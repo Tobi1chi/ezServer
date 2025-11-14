@@ -111,75 +111,11 @@ DEBUG = False
 FSM_MAPS: dict = {
     "state1": {"campaign_id":"2860956181", "mapname":"BVR Ethi5"},
     "state2": {"campaign_id":"3355613749", "mapname":"MergeLarge"},
-    "state3": {"campaign_id":"2860956181", "mapname":"BVR Archipel"}
+    "state3": {"campaign_id":"2860956181", "mapname":"BVR Archipel"},
+    "state4": {"campaign_id":"2860956181", "mapname":"BVR Ocixem"},
+    "state5": {"campaign_id":"2860956181", "mapname":"BVR Crack"},
+    "state6": {"campaign_id":"2860956181", "mapname":"BVR afMtnsHills"}
 }
-
-def main():
-    FSM_Nodes = [_state1, _state2, _state3]
-    if not server.start_server():
-        print("无法连接到服务器，程序退出")
-        return
-
-    _test()
-
-    while DEBUG:
-        time.sleep(1)
-    start_index = input("请输入起始状态(从0开始): ")
-    start_index = int(start_index)
-    for func in FSM_Nodes[start_index:]:
-        func()
-    while True:
-        for func in FSM_Nodes:
-            func()
-
-
-def _test():
-    print("Test")
-    server.send_message("checkhost")
-    time.sleep(0.2)
-    dict_received_message = json.loads(server.receive_message())
-    print(dict_received_message["msg"])
-def _state1():
-    global count_num
-    print("State 1")
-    if count_num == 0:
-        init_server("state1")
-        count_num += 1
-    else:
-        restart_server("state1")
-        count_num += 1
-    time.sleep(60) # 1 minute
-    server.send_message("start")
-    time.sleep(1*H2S) # 1 hour
-    end_state("state1")
-
-def _state2():
-    global count_num
-    print("State 2")
-    if count_num == 0:
-        init_server("state2")
-        count_num += 1
-    else:
-        restart_server("state2")
-        count_num += 1
-    time.sleep(60) # 1 minute
-    server.send_message("start")
-    time.sleep(1*H2S) # 1 hour
-    end_state("state2")
-
-def _state3():
-    global count_num
-    print("State 3")
-    if count_num == 0:
-        init_server("state3")
-        count_num += 1
-    else:
-        restart_server("state3")
-        count_num += 1
-    time.sleep(60) # 1 minute
-    server.send_message("start")
-    time.sleep(1*H2S) # 1 hour
-    end_state("state3")
 
 def init_server(state:str):
     server.send_message("sethost name " + SERVER_NAME)
@@ -314,6 +250,125 @@ def get_message():
         return None
     print(msg)
 
+def _test():
+    print("Test")
+    server.send_message("checkhost")
+    time.sleep(0.2)
+    dict_received_message = json.loads(server.receive_message())
+    print(dict_received_message["msg"])
 
+def _state1():
+    global count_num
+    print("State 1\n")
+    print(f"count_num: {count_num}\n")
+    if count_num == 0:
+        init_server("state1")
+        count_num += 1
+    else:
+        restart_server("state1")
+        count_num += 1
+    time.sleep(60) # 1 minute
+    server.send_message("start")
+    time.sleep(1*H2S) # 1 hour
+    end_state("state1")
+
+def _state2():
+    global count_num
+    print("State 2\n")
+    print(f"count_num: {count_num}\n")
+    if count_num == 0:
+        init_server("state2")
+        count_num += 1
+    else:
+        restart_server("state2")
+        count_num += 1
+    time.sleep(60) # 1 minute
+    server.send_message("start")
+    time.sleep(1*H2S) # 1 hour
+    end_state("state2")
+
+def _state3():
+    global count_num
+    print("State 3\n")
+    print(f"count_num: {count_num}\n")
+    if count_num == 0:
+        init_server("state3")
+        count_num += 1
+    else:
+        restart_server("state3")
+        count_num += 1
+    time.sleep(60) # 1 minute
+    server.send_message("start")
+    time.sleep(1*H2S) # 1 hour
+    end_state("state3")
+
+def _state4():
+    global count_num
+    print("State 4\n")
+    print(f"count_num: {count_num}\n")
+    if count_num == 0:
+        init_server("state4")
+        count_num += 1
+    else:
+        restart_server("state4")
+        count_num += 1
+    time.sleep(60) # 1 minute
+    server.send_message("start")
+    time.sleep(1*H2S) # 1 hour
+    end_state("state4")
+
+def _state5():
+    global count_num
+    print("State 5\n")
+    print(f"count_num: {count_num}\n")
+    if count_num == 0:
+        init_server("state5")
+        count_num += 1
+    else:
+        restart_server("state5")
+        count_num += 1
+    time.sleep(60) # 1 minute
+    server.send_message("start")
+    time.sleep(1*H2S) # 1 hour
+    end_state("state5")
+
+def _state6():
+    global count_num
+    print("State 6\n")
+    print(f"count_num: {count_num}\n")
+    if count_num == 0:
+        init_server("state6")
+        count_num += 1
+    else:
+        restart_server("state6")
+        count_num += 1
+    time.sleep(60) # 1 minute
+    server.send_message("start")
+    time.sleep(1*H2S) # 1 hour
+    end_state("state6")
+
+def main():
+    FSM_Nodes = [_state1, _state2, _state3, _state4, _state5, _state6]
+    if not server.start_server():
+        print("无法连接到服务器，程序退出")
+        return
+    _test()
+    while DEBUG:
+        time.sleep(1)
+    
+    print("--------------------------------")
+    print("已加载的FSM状态:")
+    for k, v in FSM_MAPS.items():
+        print(k, "=>", v["mapname"])
+    print("--------------------------------")
+    start_index = input("请输入起始状态(从0开始): ")
+    start_index = int(start_index)
+    for func in FSM_Nodes[start_index:]:
+        func()
+    while True:
+        for func in FSM_Nodes:
+            func()
 if __name__ == '__main__':
     main()
+
+
