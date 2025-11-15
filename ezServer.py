@@ -10,6 +10,7 @@ import json
 import re
 import queue
 from Timer import tm
+import random
 # 设置控制台输出为 UTF-8 编码
 if sys.platform == 'win32':
     sys.stdout.reconfigure(encoding='utf-8')
@@ -107,6 +108,8 @@ BASE_PATH = Path(r"C:\Users\28262\AppData\Roaming\Boundless Dynamics, LLC\VTOLVR
 LOCAL_PATH = Path(__file__).parent
 AUTOSAVE_PATH = BASE_PATH / "Autosave1"
 DEBUG = False
+RAND_MODE = False
+
 
 FSM_MAPS: dict = {
     "state1": {"campaign_id":"2860956181", "mapname":"BVR Ethi5"},
@@ -363,11 +366,17 @@ def main():
     print("--------------------------------")
     start_index = input("请输入起始状态(从0开始): ")
     start_index = int(start_index)
+    if RAND_MODE:
+        while True:
+            random.choice(FSM_Nodes)()
+            continue
     for func in FSM_Nodes[start_index:]:
         func()
     while True:
         for func in FSM_Nodes:
             func()
+
+    
 if __name__ == '__main__':
     main()
 
