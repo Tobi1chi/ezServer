@@ -1,6 +1,7 @@
 import sqlite3
 import os
 from pathlib import Path
+from typing import List, Dict, Union
 import json
 import datetime
 import re 
@@ -12,7 +13,7 @@ DB_DIR = Path(__file__).parent /"DB"
 DB_PATH = FLIGHTLOG_DB_PATH
 
 class flightlogDB:
-    def __init__(self, db_path: Path | str = DB_PATH):
+    def __init__(self, db_path: Union[Path, str] = DB_PATH):
         self.db_path = db_path
         self.init_db()
         
@@ -22,7 +23,7 @@ class flightlogDB:
         conn.execute("PRAGMA foreign_keys = ON;")
         return conn
 
-    def init_db(self, db_path: Path | str = DB_PATH):
+    def init_db(self, db_path: Union[Path, str] = DB_PATH):
         """初始化数据库：创建所有表（如果不存在）"""
         if not DB_DIR.exists():
             DB_DIR.mkdir(parents=True, exist_ok=True)
