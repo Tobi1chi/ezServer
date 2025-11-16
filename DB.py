@@ -122,9 +122,9 @@ def insert_kill_event(
     time_ms: int,
     killer_player_id: int,
     victim_player_id: int,
-    weapon: str | None = None,
-    kill_type: str | None = None,
-    extra_data: str | None = None,
+    weapon: Union[str, None] = None,
+    kill_type: Union[str, None] = None,
+    extra_data: Union[str, None] = None,
 ) -> int:
     """
     往数据库插入一条 KILL 事件。
