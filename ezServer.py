@@ -1,20 +1,47 @@
 import socket
 import threading
-import os
 import sys
 from pathlib import Path
 import shutil
 import time
 from datetime import datetime
 import json
-import re
 import queue
+from collections import deque
+from dataclasses import dataclass, field
+from typing import Callable, Dict, Set
 from Timer import tm
 import random
 # 设置控制台输出为 UTF-8 编码
 if sys.platform == 'win32':
     sys.stdout.reconfigure(encoding='utf-8')
     sys.stderr.reconfigure(encoding='utf-8')
+
+class ResponseTimeout(Exception):
+    """Raised when wait_for_response() times out waiting for data."""
+
+
+class UnexpectedResponse(Exception):
+    """Raised when a received response source differs from what was expected."""
+
+
+@dataclass
+class PendingWaiter:
+    expected_src: Set[str]
+    event: threading.Event = field(default_factory=threading.Event)
+    messages: deque = field(default_factory=deque)
+    timeout_at: float = 0.0
+    consume: bool = True
+
+    def matches(self, src: str) -> bool:
+        return src in self.expected_src
+
+    def add_message(self, msg: dict) -> None:
+        self.messages.append(msg)
+        self.event.set()
+
+
+_waiter_tls = threading.local()
 
 count_num = 0
 
@@ -24,9 +51,10 @@ class EzServer:
         self.port = port
         self.server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.connected = False
-        self.received_messages = []
-        self.message_lock = threading.Lock()
-        self.message_queue = queue.Queue()
+        self._pending_waiters: Dict[str, PendingWaiter] = {}
+        self._general_queue: queue.Queue = queue.Queue()
+        self._waiter_lock = threading.Lock()
+        self._state_complete = threading.Event()
 
     def receive_messages(self):
         buffer = ""
@@ -48,8 +76,23 @@ class EzServer:
                     line, buffer = buffer.split('\n', 1)
                     line = line.strip()
                     if line:
-                        with self.message_lock:
-                            self.received_messages = [line]
+                        try:
+                            # Route decoded JSON messages to registered waiters/queues
+                            msg_dict = json.loads(line)
+                            self._route_message(msg_dict)
+                        except json.JSONDecodeError:
+                            print(f'Warning: failed to parse JSON message: {line}')
+                            # Preserve raw messages for legacy consumers/debugging
+                            self._general_queue.put(line)
+
+                        if not hasattr(self, '_last_cleanup'):
+                            self._last_cleanup = time.time()
+                            self._msg_count = 0
+                        self._msg_count += 1
+                        if self._msg_count >= 100 or (time.time() - self._last_cleanup) > 10:
+                            self._cleanup_expired_waiters()
+                            self._msg_count = 0
+                            self._last_cleanup = time.time()
                         #print(f"Received: {line}")
             except Exception as e:
                 if self.connected:
@@ -66,15 +109,134 @@ class EzServer:
             except Exception as e:
                 print(f'Send error: {e}')
 
-    def receive_message(self):
-        """拿到最新一条消息，并清空队列"""
-        with self.message_lock:
-            if not self.received_messages:
-                return None
-            msg = self.received_messages[-1]   # 取最新的一条
-            self.received_messages.clear()     # 清空
-            return msg
+    def _route_message(self, msg_dict: dict) -> None:
+        src = msg_dict.get('src')
+        if not src:
+            self._general_queue.put(msg_dict)
+            return
 
+        waiters_to_remove = []
+        matched = False
+        with self._waiter_lock:
+            for waiter_id, waiter in list(self._pending_waiters.items()):
+                if waiter.matches(src):
+                    waiter.add_message(msg_dict)
+                    matched = True
+                    if waiter.consume:
+                        waiters_to_remove.append(waiter_id)
+
+            for waiter_id in waiters_to_remove:
+                # Consume one-shot waiters after delivering their message(s)
+                self._pending_waiters.pop(waiter_id, None)
+
+        if not matched:
+            # Fallback queue keeps unmatched responses for general consumers
+            print(f'[INFO] Unmatched message: src="{src}", type={msg_dict.get("type")}, msg preview: {str(msg_dict.get("msg"))[:50]}...')
+            self._general_queue.put(msg_dict)
+
+    def _cleanup_expired_waiters(self) -> None:
+        '''Remove waiters that exceeded their timeout. Called periodically to prevent memory leaks.'''
+        with self._waiter_lock:
+            current_time = time.time()
+            expired = [wid for wid, waiter in self._pending_waiters.items() if current_time > waiter.timeout_at]
+            for waiter_id in expired:
+                print(f'[WARN] 等待器 {waiter_id} 已超时, 自动清理')
+                self._pending_waiters.pop(waiter_id, None)
+
+
+    def wait_for_response(self, expected_src: str | list, timeout: float = 5.0, consume: bool = True) -> list:
+        """Wait for specific response type(s) from VTOL server. Raises ResponseTimeout on timeout."""
+        expected_set: Set[str]
+        if isinstance(expected_src, str):
+            expected_set = {expected_src}
+        else:
+            expected_set = set(expected_src)
+
+        if not expected_set:
+            raise ValueError('expected_src cannot be empty')
+
+        waiter_id = None
+        waiter: PendingWaiter | None = None
+        timeout_at = time.time() + timeout
+
+        with self._waiter_lock:
+            # Reuse waiter reserved by send_and_wait (if present) so we do not miss fast responses
+            override_id = getattr(_waiter_tls, 'waiter_id', None)
+            if override_id is not None:
+                setattr(_waiter_tls, 'waiter_id', None)
+            if override_id:
+                waiter = self._pending_waiters.get(override_id)
+                if waiter:
+                    waiter.expected_src = expected_set
+                    waiter.consume = consume
+                    waiter.timeout_at = timeout_at
+                    waiter_id = override_id
+
+            if waiter is None:
+                waiter_id = f"waiter_{time.time()}_{id(self)}"
+                waiter = PendingWaiter(
+                    expected_src=expected_set,
+                    timeout_at=timeout_at,
+                    consume=consume,
+                )
+                self._pending_waiters[waiter_id] = waiter
+
+        try:
+            if not self.connected:
+                raise ConnectionError('服务器已断开连接, 无法等待响应')
+            event_signaled = waiter.event.wait(timeout)
+            if not self.connected:
+                raise ConnectionError('服务器已断开连接, 等待过程中断开')
+            if event_signaled and waiter.messages:
+                messages = list(waiter.messages)
+                waiter.messages.clear()
+                return messages
+            raise ResponseTimeout(f"No response for {expected_set} after {timeout}s")
+        finally:
+            with self._waiter_lock:
+                self._pending_waiters.pop(waiter_id, None)
+
+
+    def send_and_wait(self, command: str, expected_src: str | list, timeout: float = 5.0) -> list:
+        """Send command and wait for response (atomic operation). Prevents race conditions."""
+        expected_set: Set[str]
+        if isinstance(expected_src, str):
+            expected_set = {expected_src}
+        else:
+            expected_set = set(expected_src)
+        if not expected_set:
+            raise ValueError('expected_src cannot be empty')
+
+        waiter_id = f"waiter_{time.time()}_{id(self)}"
+        waiter = PendingWaiter(
+            expected_src=expected_set,
+            timeout_at=time.time() + timeout,
+            consume=True,
+        )
+
+        with self._waiter_lock:
+            # Register waiter under this thread so wait_for_response picks it up before routing completes
+            self._pending_waiters[waiter_id] = waiter
+            setattr(_waiter_tls, 'waiter_id', waiter_id)
+            self.send_message(command)
+
+        try:
+            return self.wait_for_response(expected_src, timeout)
+        finally:
+            with self._waiter_lock:
+                if getattr(_waiter_tls, 'waiter_id', None) == waiter_id:
+                    setattr(_waiter_tls, 'waiter_id', None)
+                self._pending_waiters.pop(waiter_id, None)
+
+    def wait_lobby_period(self, seconds: int, on_complete: Callable) -> None:
+        '''Start non-blocking lobby timer. Callback fires after duration.'''
+        timer_name = f'lobby_{time.time()}_{id(self)}'
+        tm.start_timer(timer_name, seconds * 1000, on_complete, single_shot=True)
+
+    def wait_match_duration(self, seconds: int, on_complete: Callable) -> None:
+        '''Start non-blocking match timer. Callback fires after duration.'''
+        timer_name = f'match_{time.time()}_{id(self)}'
+        tm.start_timer(timer_name, seconds * 1000, on_complete, single_shot=True)
 
     def start_server(self):
         try:
@@ -90,6 +252,13 @@ class EzServer:
             return False
     
     def stop_server(self):
+        # Wake any waiters to avoid deadlocks on disconnect
+        with self._waiter_lock:
+            if self._pending_waiters:
+                print(f'Warning: clearing {len(self._pending_waiters)} pending waiters due to disconnect')
+                for waiter in self._pending_waiters.values():
+                    waiter.event.set()
+                self._pending_waiters.clear()
         self.connected = False
         if self.server:
             self.server.close()
@@ -122,73 +291,74 @@ FSM_MAPS: dict = {
 
 def init_server(state:str):
     server.send_message("sethost name " + SERVER_NAME)
-    time.sleep(0.3)
     if PUBLIC:
         server.send_message("sethost password")
     else:
         server.send_message("sethost password " + SERVER_PASSWORD)
-    time.sleep(0.3)
     if UNIT_ICON:
         server.send_message("sethost uniticon true")
     else:
         server.send_message("sethost uniticon false")
-    time.sleep(0.3)
     server.send_message(f"sethost campaign {FSM_MAPS[state]['campaign_id']}")
-    time.sleep(0.3)
-    get_message()
     server.send_message(f"sethost mission {FSM_MAPS[state]['mapname']}")
-    time.sleep(0.3)
-    get_message()
     server.send_message("checkhost")
-    time.sleep(0.3)
-    get_message()
-    time.sleep(0.5)
-    server.send_message("config")
-    time.sleep(50)
-    server.send_message("host")
+    try:
+        server.send_and_wait("config", "HostConfig", timeout=60)
+    except ResponseTimeout as e:
+        print(f'[ERROR] config 命令超时: {e}')
+        raise
+    try:
+        server.send_and_wait("host", "LobbyReady", timeout=30)
+    except ResponseTimeout as e:
+        print(f'[ERROR] host 命令超时: {e}')
+        raise
 
 def restart_server(state:str):
     server.send_message(f"sethost campaign {FSM_MAPS[state]['campaign_id']}")
-    time.sleep(0.3)
     server.send_message(f"sethost mission {FSM_MAPS[state]['mapname']}")
-    time.sleep(0.3)
-    server.send_message("restart")
+    server.send_and_wait("restart", "LobbyReady", timeout=30)
 
 
 def end_state(state:str):
     server.send_message("skip")
-    time.sleep(0.3)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    server.receive_message() #接收并清空队列
-    server.send_message("flightlog")
-    time.sleep(0.5)
-    raw = server.receive_message()
+    try:
+        responses = server.send_and_wait("flightlog", "GetFlightLog", timeout=10)
+        raw = responses[0]
+    except ResponseTimeout:
+        print("没有收到 flightlog 响应,重新获取")
+        try:
+            responses = server.send_and_wait("flightlog", "GetFlightLog", timeout=10)
+            raw = responses[0]
+        except ResponseTimeout:
+            print("没有收到 flightlog 响应")
+            raw = {}
+
     print("flightlog raw:", raw)
 
-    if not raw:
-        print("没有收到 flightlog 响应,重新获取")
-        server.receive_message()
-        server.send_message("flightlog")
-        time.sleep(0.5)
-        raw = server.receive_message()
-
-    if not raw:
-        print("没有收到 flightlog 响应")
-        raw = "{}"
-
     try:
-        d = json.loads(raw)
+        if isinstance(raw, dict):
+            d = raw
+        else:
+            d = json.loads(raw)
         src = d.get("src")
-        if "GetFlightLog" not in src:
+        if not src or "GetFlightLog" not in src:
             print("flightlog 响应中没有 GetFlightLog 字段:", d)
-            server.send_message("flightlog")
-            time.sleep(0.5)
-            raw = server.receive_message()
-        d = json.loads(raw)
-        src = d.get("src")
-        if "GetFlightLog" not in src:
-            print("flightlog 响应中没有 GetFlightLog 字段,退出")
-            return
+            try:
+                responses = server.send_and_wait("flightlog", "GetFlightLog", timeout=10)
+                raw = responses[0]
+                print("flightlog raw:", raw)
+                if isinstance(raw, dict):
+                    d = raw
+                else:
+                    d = json.loads(raw)
+                src = d.get("src")
+                if not src or "GetFlightLog" not in src:
+                    print("flightlog 响应中没有 GetFlightLog 字段,退出")
+                    return
+            except ResponseTimeout:
+                print("flightlog 响应中没有 GetFlightLog 字段,退出")
+                return
     except json.JSONDecodeError as e:
         print("flightlog JSON 解析失败:", e)
         return
@@ -210,7 +380,6 @@ def end_state(state:str):
         copy_folder(AUTOSAVE_PATH, LOCAL_PATH/"Replays"/f"{FSM_MAPS[state]['mapname']}_{timestamp}")
         with open(LOCAL_PATH/"Replays"/f"{FSM_MAPS[state]['mapname']}_{timestamp}/flightlog.json", "w", encoding='utf-8') as f:
             f.write(msg_str)
-        time.sleep(1)
         zip_folder(LOCAL_PATH/"Replays"/f"{FSM_MAPS[state]['mapname']}_{timestamp}", LOCAL_PATH/"Replays"/f"{FSM_MAPS[state]['mapname']}_{timestamp}.zip")
         delete_folder(LOCAL_PATH/"Replays"/f"{FSM_MAPS[state]['mapname']}_{timestamp}")
         delete_folder(AUTOSAVE_PATH)
@@ -223,8 +392,6 @@ def end_state(state:str):
             f.write(msg_str)
         zip_folder(LOCAL_PATH/"Replays"/f"{FSM_MAPS[state]['mapname']}_{timestamp}", LOCAL_PATH/"Replays"/f"{FSM_MAPS[state]['mapname']}_{timestamp}.zip")
         delete_folder(LOCAL_PATH/"Replays"/f"{FSM_MAPS[state]['mapname']}_{timestamp}")
-
-    time.sleep(60) #1 分钟玩家复盘时间
 
 def zip_folder(folder: Path, out_zip: Path):
     shutil.make_archive(str(out_zip), "zip", str(folder.parent), folder.name)
@@ -247,18 +414,15 @@ def create_folder(folder: Path):
     if not folder.exists():
         folder.mkdir(parents=True)
 
-def get_message():
-    msg = server.receive_message()
-    if msg is None:
-        return None
-    print(msg)
-
 def _test():
     print("Test")
-    server.send_message("checkhost")
-    time.sleep(0.2)
-    dict_received_message = json.loads(server.receive_message())
-    print(dict_received_message["msg"])
+    try:
+        responses = server.send_and_wait("checkhost", ["CheckHost", "HostConfig"], timeout=5)
+        dict_received_message = responses[0]
+    except ResponseTimeout:
+        print("checkhost timeout")
+        return
+    print(dict_received_message.get("msg", "No msg field"))
 
 def _state1():
     global count_num
@@ -270,10 +434,16 @@ def _state1():
     else:
         restart_server("state1")
         count_num += 1
-    time.sleep(60) # 1 minute
-    server.send_message("start")
-    time.sleep(1*H2S) # 1 hour
-    end_state("state1")
+    def on_lobby_complete():
+        server.send_message("start")
+
+        def on_match_complete():
+            end_state("state1")
+            server._state_complete.set()
+
+        server.wait_match_duration(1 * H2S, on_match_complete)
+
+    server.wait_lobby_period(60, on_lobby_complete)
 
 def _state2():
     global count_num
@@ -285,10 +455,16 @@ def _state2():
     else:
         restart_server("state2")
         count_num += 1
-    time.sleep(60) # 1 minute
-    server.send_message("start")
-    time.sleep(1*H2S) # 1 hour
-    end_state("state2")
+    def on_lobby_complete():
+        server.send_message("start")
+
+        def on_match_complete():
+            end_state("state2")
+            server._state_complete.set()
+
+        server.wait_match_duration(1 * H2S, on_match_complete)
+
+    server.wait_lobby_period(60, on_lobby_complete)
 
 def _state3():
     global count_num
@@ -300,10 +476,16 @@ def _state3():
     else:
         restart_server("state3")
         count_num += 1
-    time.sleep(60) # 1 minute
-    server.send_message("start")
-    time.sleep(1*H2S) # 1 hour
-    end_state("state3")
+    def on_lobby_complete():
+        server.send_message("start")
+
+        def on_match_complete():
+            end_state("state3")
+            server._state_complete.set()
+
+        server.wait_match_duration(1 * H2S, on_match_complete)
+
+    server.wait_lobby_period(60, on_lobby_complete)
 
 def _state4():
     global count_num
@@ -315,10 +497,16 @@ def _state4():
     else:
         restart_server("state4")
         count_num += 1
-    time.sleep(60) # 1 minute
-    server.send_message("start")
-    time.sleep(1*H2S) # 1 hour
-    end_state("state4")
+    def on_lobby_complete():
+        server.send_message("start")
+
+        def on_match_complete():
+            end_state("state4")
+            server._state_complete.set()
+
+        server.wait_match_duration(1 * H2S, on_match_complete)
+
+    server.wait_lobby_period(60, on_lobby_complete)
 
 def _state5():
     global count_num
@@ -330,10 +518,16 @@ def _state5():
     else:
         restart_server("state5")
         count_num += 1
-    time.sleep(60) # 1 minute
-    server.send_message("start")
-    time.sleep(1*H2S) # 1 hour
-    end_state("state5")
+    def on_lobby_complete():
+        server.send_message("start")
+
+        def on_match_complete():
+            end_state("state5")
+            server._state_complete.set()
+
+        server.wait_match_duration(1 * H2S, on_match_complete)
+
+    server.wait_lobby_period(60, on_lobby_complete)
 
 def _state6():
     global count_num
@@ -345,10 +539,16 @@ def _state6():
     else:
         restart_server("state6")
         count_num += 1
-    time.sleep(60) # 1 minute
-    server.send_message("start")
-    time.sleep(1*H2S) # 1 hour
-    end_state("state6")
+    def on_lobby_complete():
+        server.send_message("start")
+
+        def on_match_complete():
+            end_state("state6")
+            server._state_complete.set()
+
+        server.wait_match_duration(1 * H2S, on_match_complete)
+
+    server.wait_lobby_period(60, on_lobby_complete)
 
 def main():
     FSM_Nodes = [_state1, _state2, _state3, _state4, _state5, _state6]
@@ -369,15 +569,19 @@ def main():
     if RAND_MODE:
         while True:
             random.choice(FSM_Nodes)()
+            server._state_complete.wait()
+            server._state_complete.clear()
             continue
     for func in FSM_Nodes[start_index:]:
         func()
+        server._state_complete.wait()
+        server._state_complete.clear()
     while True:
         for func in FSM_Nodes:
             func()
+            server._state_complete.wait()
+            server._state_complete.clear()
 
     
 if __name__ == '__main__':
     main()
-
-
