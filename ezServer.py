@@ -9,9 +9,10 @@ import json
 import queue
 from collections import deque
 from dataclasses import dataclass, field
-from typing import Callable, Dict, Set
+from typing import Callable, Dict, Set, Union
 from Timer import tm
 import random
+import re #using re to filter message
 # 设置控制台输出为 UTF-8 编码
 if sys.platform == 'win32':
     sys.stdout.reconfigure(encoding='utf-8')
@@ -55,6 +56,10 @@ class EzServer:
         self._general_queue: queue.Queue = queue.Queue()
         self._waiter_lock = threading.Lock()
         self._state_complete = threading.Event()
+
+        # Response filters
+        self._quiet_unmatched_srcs = {}
+        self._auto_process_srcs = {"OnChatMsg"}
 
     def receive_messages(self):
         buffer = ""
@@ -129,9 +134,13 @@ class EzServer:
                 # Consume one-shot waiters after delivering their message(s)
                 self._pending_waiters.pop(waiter_id, None)
 
+        if matched:
+            print(f'[INFO] Matched message: src="{src}", type={msg_dict.get("type")}, msg: {str(msg_dict.get("msg"))[:50]}...') 
+            #Shorter message for matched messages(U know what it should be)
+            return
         if not matched:
             # Fallback queue keeps unmatched responses for general consumers
-            print(f'[INFO] Unmatched message: src="{src}", type={msg_dict.get("type")}, msg preview: {str(msg_dict.get("msg"))[:50]}...')
+            print(f'[INFO] Unmatched message: src="{src}", type={msg_dict.get("type")}, msg: {str(msg_dict.get("msg"))[:200]}...')
             self._general_queue.put(msg_dict)
 
     def _cleanup_expired_waiters(self) -> None:
@@ -144,7 +153,7 @@ class EzServer:
                 self._pending_waiters.pop(waiter_id, None)
 
 
-    def wait_for_response(self, expected_src: str | list, timeout: float = 5.0, consume: bool = True) -> list:
+    def wait_for_response(self, expected_src: Union[str, list], timeout: float = 5.0, consume: bool = True) -> list:    
         """Wait for specific response type(s) from VTOL server. Raises ResponseTimeout on timeout."""
         expected_set: Set[str]
         if isinstance(expected_src, str):
@@ -156,7 +165,7 @@ class EzServer:
             raise ValueError('expected_src cannot be empty')
 
         waiter_id = None
-        waiter: PendingWaiter | None = None
+        waiter: Union[PendingWaiter, None] = None
         timeout_at = time.time() + timeout
 
         with self._waiter_lock:
@@ -197,7 +206,7 @@ class EzServer:
                 self._pending_waiters.pop(waiter_id, None)
 
 
-    def send_and_wait(self, command: str, expected_src: str | list, timeout: float = 5.0) -> list:
+    def send_and_wait(self, command: str, expected_src: Union[str, list], timeout: float = 5.0) -> list:
         """Send command and wait for response (atomic operation). Prevents race conditions."""
         expected_set: Set[str]
         if isinstance(expected_src, str):
@@ -263,6 +272,16 @@ class EzServer:
         if self.server:
             self.server.close()
         print('Server stopped')
+    
+    def _auto_process_message(self, msg_dict: dict) -> None:
+        """Auto-process message if it matches the auto_process_srcs
+        Currently unused.
+        """
+        src = msg_dict.get("src")
+        if src in self._auto_process_srcs:
+            print(f'[INFO] Auto-processing message: src="{src}", type={msg_dict.get("type")}, msg: {str(msg_dict.get("msg"))[:200]}...')
+            return True
+        return False
 server = EzServer()
 S2MS = 1000
 MIN2MS = 60 * S2MS
@@ -286,7 +305,9 @@ FSM_MAPS: dict = {
     "state3": {"campaign_id":"2860956181", "mapname":"BVR Archipel"},
     "state4": {"campaign_id":"2860956181", "mapname":"BVR Ocixem"},
     "state5": {"campaign_id":"2860956181", "mapname":"BVR Crack"},
-    "state6": {"campaign_id":"2860956181", "mapname":"BVR afMtnsHills"}
+    "state6": {"campaign_id":"2860956181", "mapname":"BVR afMtnsHills"},
+    "state7": {"campaign_id":"3583755382", "mapname":"Dragon's Valley"},
+    "state8": {"campaign_id":"3583755382", "mapname":"Fjord Coast"},
 }
 
 def init_server(state:str):
@@ -308,7 +329,7 @@ def init_server(state:str):
         print(f'[ERROR] config 命令超时: {e}')
         raise
     try:
-        server.send_and_wait("host", "LobbyReady", timeout=30)
+        server.send_and_wait("host", "LobbyReady", timeout=120)
     except ResponseTimeout as e:
         print(f'[ERROR] host 命令超时: {e}')
         raise
@@ -316,7 +337,7 @@ def init_server(state:str):
 def restart_server(state:str):
     server.send_message(f"sethost campaign {FSM_MAPS[state]['campaign_id']}")
     server.send_message(f"sethost mission {FSM_MAPS[state]['mapname']}")
-    server.send_and_wait("restart", "LobbyReady", timeout=30)
+    server.send_and_wait("restart", "LobbyReady", timeout=120)
 
 
 def end_state(state:str):
@@ -367,8 +388,9 @@ def end_state(state:str):
     if msg is None:
         print("flightlog 响应中没有 msg 字段:", d)
         return
-
-    print("flightlog msg:", msg)
+    print("flightlog msg:")
+    for log in msg:
+        print(log)
     # 如果 msg 是列表或字典，转换为 JSON 字符串；如果已经是字符串，直接使用
     if isinstance(msg, (list, dict)):
         msg_str = json.dumps(msg, ensure_ascii=False, indent=2)
@@ -428,6 +450,8 @@ def _state1():
     global count_num
     print("State 1\n")
     print(f"count_num: {count_num}\n")
+    duration = 1 * H2S
+    time_prepare = 60 #time for read briefing
     if count_num == 0:
         init_server("state1")
         count_num += 1
@@ -441,12 +465,14 @@ def _state1():
             end_state("state1")
             server._state_complete.set()
 
-        server.wait_match_duration(1 * H2S, on_match_complete)
+        server.wait_match_duration(duration, on_match_complete)
 
-    server.wait_lobby_period(60, on_lobby_complete)
+    server.wait_lobby_period(time_prepare, on_lobby_complete)
 
 def _state2():
     global count_num
+    duration = 1 * H2S
+    time_prepare = 60 #time for read briefing
     print("State 2\n")
     print(f"count_num: {count_num}\n")
     if count_num == 0:
@@ -462,12 +488,14 @@ def _state2():
             end_state("state2")
             server._state_complete.set()
 
-        server.wait_match_duration(1 * H2S, on_match_complete)
+        server.wait_match_duration(duration, on_match_complete)
 
-    server.wait_lobby_period(60, on_lobby_complete)
+    server.wait_lobby_period(time_prepare, on_lobby_complete)
 
 def _state3():
     global count_num
+    duration = 1 * H2S
+    time_prepare = 60 #time for read briefing
     print("State 3\n")
     print(f"count_num: {count_num}\n")
     if count_num == 0:
@@ -483,12 +511,14 @@ def _state3():
             end_state("state3")
             server._state_complete.set()
 
-        server.wait_match_duration(1 * H2S, on_match_complete)
+        server.wait_match_duration(duration, on_match_complete)
 
-    server.wait_lobby_period(60, on_lobby_complete)
+    server.wait_lobby_period(time_prepare, on_lobby_complete)
 
 def _state4():
     global count_num
+    duration = 1 * H2S
+    time_prepare = 60 #time for read briefing
     print("State 4\n")
     print(f"count_num: {count_num}\n")
     if count_num == 0:
@@ -504,12 +534,14 @@ def _state4():
             end_state("state4")
             server._state_complete.set()
 
-        server.wait_match_duration(1 * H2S, on_match_complete)
+        server.wait_match_duration(duration, on_match_complete)
 
-    server.wait_lobby_period(60, on_lobby_complete)
+    server.wait_lobby_period(time_prepare, on_lobby_complete)
 
 def _state5():
     global count_num
+    duration = 1 * H2S
+    time_prepare = 60 #time for read briefing
     print("State 5\n")
     print(f"count_num: {count_num}\n")
     if count_num == 0:
@@ -525,12 +557,14 @@ def _state5():
             end_state("state5")
             server._state_complete.set()
 
-        server.wait_match_duration(1 * H2S, on_match_complete)
+        server.wait_match_duration(duration, on_match_complete)
 
-    server.wait_lobby_period(60, on_lobby_complete)
+    server.wait_lobby_period(time_prepare, on_lobby_complete)
 
 def _state6():
     global count_num
+    duration = 1 * H2S
+    time_prepare = 60 #time for read briefing
     print("State 6\n")
     print(f"count_num: {count_num}\n")
     if count_num == 0:
@@ -546,12 +580,57 @@ def _state6():
             end_state("state6")
             server._state_complete.set()
 
-        server.wait_match_duration(1 * H2S, on_match_complete)
+        server.wait_match_duration(duration, on_match_complete)
 
-    server.wait_lobby_period(60, on_lobby_complete)
+    server.wait_lobby_period(time_prepare, on_lobby_complete)
+
+
+def _state7():
+    global count_num
+    duration = 1 * H2S
+    time_prepare = 60 #time for read briefing
+    print("State 7\n")
+    print(f"count_num: {count_num}\n")
+    if count_num == 0:
+        init_server("state7")
+        count_num += 1
+    else:
+        restart_server("state7")
+        count_num += 1
+    def on_lobby_complete():
+        server.send_message("start")
+
+        def on_match_complete():
+            end_state("state7")
+            server._state_complete.set()
+
+        server.wait_match_duration(duration, on_match_complete)
+    server.wait_lobby_period(time_prepare, on_lobby_complete)
+
+def _state8():
+    global count_num
+    duration = 1 * H2S
+    time_prepare = 60 #time for read briefing
+    print("State 8\n")
+    print(f"count_num: {count_num}\n")
+    if count_num == 0:
+        init_server("state8")
+        count_num += 1
+    else:
+        restart_server("state8")
+        count_num += 1
+    def on_lobby_complete():
+        server.send_message("start")
+
+        def on_match_complete():
+            end_state("state8")
+            server._state_complete.set()
+
+        server.wait_match_duration(duration, on_match_complete)
+    server.wait_lobby_period(time_prepare, on_lobby_complete)
 
 def main():
-    FSM_Nodes = [_state1, _state2, _state3, _state4, _state5, _state6]
+    FSM_Nodes = [_state1, _state2, _state3, _state4, _state5, _state6, _state7, _state8]
     if not server.start_server():
         print("无法连接到服务器，程序退出")
         return
