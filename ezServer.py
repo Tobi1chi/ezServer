@@ -278,8 +278,9 @@ class EzServer:
         Currently unused.
         """
         #Registed regular expression to filter message
-        player_connected_regex = r"PlayerConnected"
-
+        re_connected = r'^\$log_(.+?) has connected\.$'
+        re_disconnected = r'^\$log_(.+?) has disconnected\.$'
+        
 
 
         src = msg_dict.get("src")
