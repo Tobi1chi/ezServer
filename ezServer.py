@@ -140,6 +140,8 @@ class EzServer:
         if not matched:
             # Fallback queue keeps unmatched responses for general consumers
             print(f'[INFO] Unmatched message: src="{src}", type={msg_dict.get("type")}, msg: {str(msg_dict.get("msg"))[:200]}...')
+            if src in self._auto_process_srcs:
+                self._auto_process_message(msg_dict)
             self._general_queue.put(msg_dict)
 
     def _cleanup_expired_waiters(self) -> None:
@@ -276,13 +278,35 @@ class EzServer:
         """Auto-process message if it matches the auto_process_srcs
         Currently unused.
         """
+        src = msg_dict.get("src")
+        raw_msg = msg_dict.get("msg")
         #Registed regular expression to filter message
         re_connected = r'^\$log_(.+?) has connected\.$'
         re_disconnected = r'^\$log_(.+?) has disconnected\.$'
-        
+        re_kill_event = r'^\$log_([\w ]+?) killed ([A-Za-z0-9/\-]+) \(([^()]+)\) with ([A-Za-z0-9\-]+)\.$'
+        if src == "OnChatMsg":
+            #raw_msg is also a dict
+            id_dict = raw_msg.get("id") #this is also a dict ...
+            steam_id = id_dict.get("Value") #Main key for database
+            msg = raw_msg.get("msg")
+            re_msg = re.match(re_connected, msg)
+            m = re.match(re_connected, msg)
+            if m:
+                regist_playername = m.group(1)
+                regist_steam_id = steam_id
+                print(f'[INFO] Connected: {regist_playername}')
 
+            elif m := re.match(re_disconnected, msg):
+                print(f'[INFO] Disconnected: {m.group(1)}')
 
-        src = msg_dict.get("src")
+            elif m := re.match(re_kill_event, msg):
+                kill_playername = m.group(1)
+                kill_aircraft   = m.group(2)
+                kill_faction    = m.group(3)
+                kill_weapon     = m.group(4)
+                print(f'[INFO] Kill Event: {kill_playername} killed {kill_aircraft} ({kill_faction}) with {kill_weapon}')
+                print(kill_playername, kill_aircraft, kill_faction, kill_weapon)
+
         if src in self._auto_process_srcs:
             print(f'[INFO] Auto-processing message: src="{src}", type={msg_dict.get("type")}, msg: {str(msg_dict.get("msg"))[:200]}...')
             return True
