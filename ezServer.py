@@ -277,6 +277,11 @@ class EzServer:
         """Auto-process message if it matches the auto_process_srcs
         Currently unused.
         """
+        #Registed regular expression to filter message
+        player_connected_regex = r"PlayerConnected"
+
+
+
         src = msg_dict.get("src")
         if src in self._auto_process_srcs:
             print(f'[INFO] Auto-processing message: src="{src}", type={msg_dict.get("type")}, msg: {str(msg_dict.get("msg"))[:200]}...')
@@ -324,20 +329,23 @@ def init_server(state:str):
     server.send_message(f"sethost mission {FSM_MAPS[state]['mapname']}")
     server.send_message("checkhost")
     try:
-        server.send_and_wait("config", "HostConfig", timeout=60)
+        server.send_and_wait("config", "HostConfig", timeout=60*3)
     except ResponseTimeout as e:
         print(f'[ERROR] config 命令超时: {e}')
         raise
     try:
-        server.send_and_wait("host", "LobbyReady", timeout=120)
+        time.sleep(1) #看来是必须加这个延迟了，不然会偶发性有bug
+        server.send_and_wait("host", "LobbyReady", timeout=60*3)
     except ResponseTimeout as e:
         print(f'[ERROR] host 命令超时: {e}')
+        
         raise
 
 def restart_server(state:str):
     server.send_message(f"sethost campaign {FSM_MAPS[state]['campaign_id']}")
     server.send_message(f"sethost mission {FSM_MAPS[state]['mapname']}")
-    server.send_and_wait("restart", "LobbyReady", timeout=120)
+    time.sleep(1) #看来是必须加这个延迟了，不然会偶发性有bug
+    server.send_and_wait("restart", "LobbyReady", timeout=60*3)
 
 
 def end_state(state:str):
