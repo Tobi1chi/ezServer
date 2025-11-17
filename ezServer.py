@@ -137,7 +137,6 @@ class EzServer:
         if matched:
             print(f'[INFO] Matched message: src="{src}", type={msg_dict.get("type")}, msg: {str(msg_dict.get("msg"))[:50]}...') 
             #Shorter message for matched messages(U know what it should be)
-            return
         if not matched:
             # Fallback queue keeps unmatched responses for general consumers
             print(f'[INFO] Unmatched message: src="{src}", type={msg_dict.get("type")}, msg: {str(msg_dict.get("msg"))[:200]}...')
@@ -330,7 +329,7 @@ def init_server(state:str):
     server.send_message(f"sethost mission {FSM_MAPS[state]['mapname']}")
     server.send_message("checkhost")
     try:
-        server.send_and_wait("config", "HostConfig", timeout=60*3)
+        server.send_and_wait("config", "HostConfigCoroutine", timeout=60*3)
     except ResponseTimeout as e:
         print(f'[ERROR] config 命令超时: {e}')
         raise
@@ -339,7 +338,6 @@ def init_server(state:str):
         server.send_and_wait("host", "LobbyReady", timeout=60*3)
     except ResponseTimeout as e:
         print(f'[ERROR] host 命令超时: {e}')
-        
         raise
 
 def restart_server(state:str):
