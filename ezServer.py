@@ -12,6 +12,7 @@ from dataclasses import dataclass, field
 from typing import Callable, Dict, Set
 from Timer import tm
 import random
+import re #using re to filter message
 # 设置控制台输出为 UTF-8 编码
 if sys.platform == 'win32':
     sys.stdout.reconfigure(encoding='utf-8')
@@ -55,6 +56,10 @@ class EzServer:
         self._general_queue: queue.Queue = queue.Queue()
         self._waiter_lock = threading.Lock()
         self._state_complete = threading.Event()
+
+        # Response filters
+        self._quiet_unmatched_srcs = {}
+        self._auto_process_srcs = {"OnChatMsg"}
 
     def receive_messages(self):
         buffer = ""
@@ -129,9 +134,13 @@ class EzServer:
                 # Consume one-shot waiters after delivering their message(s)
                 self._pending_waiters.pop(waiter_id, None)
 
+        if matched:
+            print(f'[INFO] Matched message: src="{src}", type={msg_dict.get("type")}, msg: {str(msg_dict.get("msg"))[:50]}...') 
+            #Shorter message for matched messages(U know what it should be)
+            return
         if not matched:
             # Fallback queue keeps unmatched responses for general consumers
-            print(f'[INFO] Unmatched message: src="{src}", type={msg_dict.get("type")}, msg preview: {str(msg_dict.get("msg"))[:50]}...')
+            print(f'[INFO] Unmatched message: src="{src}", type={msg_dict.get("type")}, msg: {str(msg_dict.get("msg"))[:200]}...')
             self._general_queue.put(msg_dict)
 
     def _cleanup_expired_waiters(self) -> None:
@@ -263,6 +272,16 @@ class EzServer:
         if self.server:
             self.server.close()
         print('Server stopped')
+    
+    def _auto_process_message(self, msg_dict: dict) -> None:
+        """Auto-process message if it matches the auto_process_srcs
+        Currently unused.
+        """
+        src = msg_dict.get("src")
+        if src in self._auto_process_srcs:
+            print(f'[INFO] Auto-processing message: src="{src}", type={msg_dict.get("type")}, msg: {str(msg_dict.get("msg"))[:200]}...')
+            return True
+        return False
 server = EzServer()
 S2MS = 1000
 MIN2MS = 60 * S2MS
@@ -428,6 +447,7 @@ def _state1():
     global count_num
     print("State 1\n")
     print(f"count_num: {count_num}\n")
+    duration = 1 * H2S
     if count_num == 0:
         init_server("state1")
         count_num += 1
@@ -441,12 +461,13 @@ def _state1():
             end_state("state1")
             server._state_complete.set()
 
-        server.wait_match_duration(1 * H2S, on_match_complete)
+        server.wait_match_duration(duration, on_match_complete)
 
     server.wait_lobby_period(60, on_lobby_complete)
 
 def _state2():
     global count_num
+    duration = 1 * H2S
     print("State 2\n")
     print(f"count_num: {count_num}\n")
     if count_num == 0:
@@ -462,12 +483,13 @@ def _state2():
             end_state("state2")
             server._state_complete.set()
 
-        server.wait_match_duration(1 * H2S, on_match_complete)
+        server.wait_match_duration(duration, on_match_complete)
 
     server.wait_lobby_period(60, on_lobby_complete)
 
 def _state3():
     global count_num
+    duration = 1 * H2S
     print("State 3\n")
     print(f"count_num: {count_num}\n")
     if count_num == 0:
@@ -483,12 +505,13 @@ def _state3():
             end_state("state3")
             server._state_complete.set()
 
-        server.wait_match_duration(1 * H2S, on_match_complete)
+        server.wait_match_duration(duration, on_match_complete)
 
     server.wait_lobby_period(60, on_lobby_complete)
 
 def _state4():
     global count_num
+    duration = 1 * H2S
     print("State 4\n")
     print(f"count_num: {count_num}\n")
     if count_num == 0:
@@ -504,12 +527,13 @@ def _state4():
             end_state("state4")
             server._state_complete.set()
 
-        server.wait_match_duration(1 * H2S, on_match_complete)
+        server.wait_match_duration(duration, on_match_complete)
 
     server.wait_lobby_period(60, on_lobby_complete)
 
 def _state5():
     global count_num
+    duration = 1 * H2S
     print("State 5\n")
     print(f"count_num: {count_num}\n")
     if count_num == 0:
@@ -525,12 +549,13 @@ def _state5():
             end_state("state5")
             server._state_complete.set()
 
-        server.wait_match_duration(1 * H2S, on_match_complete)
+        server.wait_match_duration(duration, on_match_complete)
 
     server.wait_lobby_period(60, on_lobby_complete)
 
 def _state6():
     global count_num
+    duration = 1 * H2S
     print("State 6\n")
     print(f"count_num: {count_num}\n")
     if count_num == 0:
@@ -546,7 +571,7 @@ def _state6():
             end_state("state6")
             server._state_complete.set()
 
-        server.wait_match_duration(1 * H2S, on_match_complete)
+        server.wait_match_duration(duration, on_match_complete)
 
     server.wait_lobby_period(60, on_lobby_complete)
 
