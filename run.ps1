@@ -6,7 +6,7 @@ $OutputEncoding = [System.Text.Encoding]::UTF8
 Set-Location $PSScriptRoot
 
 # 运行 Python 脚本
-python ezServer.py
+py ezServer.py
 
 # 等待用户按键
 Write-Host "`n按任意键继续..."
