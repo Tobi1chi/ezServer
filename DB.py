@@ -39,7 +39,10 @@ class flightlogDB:
         CREATE TABLE IF NOT EXISTS players (
             id          INTEGER PRIMARY KEY AUTOINCREMENT,
             steam_id    TEXT NOT NULL UNIQUE,
-            current_elo REAL,
+            steam_name  TEXT NOT NULL,
+            current_elo_BVR REAL NOT NULL DEFAULT 2000,
+            current_elo_BFM REAL NOT NULL DEFAULT 50,
+            current_elo_PVE REAL NOT NULL DEFAULT 2000,
             created_at  TEXT DEFAULT (datetime('now')),
             is_banned   INTEGER NOT NULL DEFAULT 0,
             is_archived INTEGER NOT NULL DEFAULT 0
@@ -58,6 +61,7 @@ class flightlogDB:
         -- 回放
         CREATE TABLE IF NOT EXISTS replays (
             id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            file_name   TEXT NOT NULL,
             map_name    TEXT NOT NULL,
             played_at   TEXT NOT NULL,              -- ISO 字符串，比如 2025-11-15T20:30:00
             meta_blob   BLOB,                       -- 或者你之后改成 meta_path TEXT
@@ -68,7 +72,8 @@ class flightlogDB:
         CREATE TABLE IF NOT EXISTS events (
             id          INTEGER PRIMARY KEY AUTOINCREMENT,
             replay_id   INTEGER NOT NULL,
-            event_type  TEXT NOT NULL,              -- 事件类型: KILL / MISSILE_LAUNCH / ...
+            event_type  TEXT NOT NULL,              -- 事件类型: BVR_KILL / BFM_KILL / PVE_KILL / ...
+            time_local  TEXT NOT NULL,              -- 相对于回放的本地时间（[hh:mm:ss])
             time_ms     INTEGER NOT NULL,           -- 相对时间（毫秒）
             is_valid    INTEGER NOT NULL DEFAULT 1, -- 0/1 当 bool 用
             extra_data  TEXT,                       -- JSON 字符串占位
@@ -114,76 +119,6 @@ class flightlogDB:
         """
     )
         conn.commit()
-        conn.close()
-
-
-def insert_kill_event(
-    replay_id: int,
-    time_ms: int,
-    killer_player_id: int,
-    victim_player_id: int,
-    weapon: Union[str, None] = None,
-    kill_type: Union[str, None] = None,
-    extra_data: Union[str, None] = None,
-) -> int:
-    """
-    往数据库插入一条 KILL 事件。
-    整个过程是一个事务：要么全部成功，要么全部回滚。
-    返回新插入的 event_id。
-    """
-    conn = flightlogDB.get_conn()
-    cur = conn.cursor()
-
-    try:
-        # 开启事务
-        conn.execute("BEGIN")
-
-        # 1. 插入 events 表
-        cur.execute(
-            """
-            INSERT INTO events (
-                replay_id,
-                event_type,
-                time_ms,
-                is_valid,
-                extra_data,
-                weapon,
-                kill_type
-            )
-            VALUES (?, ?, ?, 1, ?, ?, ?)
-            """,
-            (replay_id, "KILL", time_ms, extra_data, weapon, kill_type),
-        )
-        event_id = cur.lastrowid
-
-        # 2. 插入 player_events：killer
-        cur.execute(
-            """
-            INSERT INTO player_events (player_id, event_id, role)
-            VALUES (?, ?, ?)
-            """,
-            (killer_player_id, event_id, "killer"),
-        )
-
-        # 3. 插入 player_events：victim
-        cur.execute(
-            """
-            INSERT INTO player_events (player_id, event_id, role)
-            VALUES (?, ?, ?)
-            """,
-            (victim_player_id, event_id, "victim"),
-        )
-
-        # 全部 OK → 提交事务
-        conn.commit()
-        return event_id
-
-    except Exception:
-        # 任意一步失败 → 回滚之前所有修改
-        conn.rollback()
-        raise
-
-    finally:
         conn.close()
 
 
