@@ -6,9 +6,9 @@ import json
 import datetime
 import re 
 
-FLIGHTLOG_DB_PATH = Path(__file__).parent /"DB"/"flightlogDB.sqlite"
+FLIGHTLOG_DB_PATH = Path(__file__).parent /"DataBase"/"flightlogDB.sqlite"
 TEST_PATH = Path(__file__).parent /"MergeLarge_20251114_120521"/"flightlog.json"
-DB_DIR = Path(__file__).parent /"DB"
+DB_DIR = Path(__file__).parent /"DataBase"
 #DB_PATH = Path(__file__).parent / "game.db"
 DB_PATH = FLIGHTLOG_DB_PATH
 

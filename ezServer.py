@@ -13,6 +13,7 @@ from typing import Callable, Dict, Set, Union
 from Timer import tm
 import random
 import re #using re to filter message
+from EloSystem import EloSystem
 # 设置控制台输出为 UTF-8 编码
 if sys.platform == 'win32':
     sys.stdout.reconfigure(encoding='utf-8')
@@ -56,6 +57,9 @@ class EzServer:
         self._general_queue: queue.Queue = queue.Queue()
         self._waiter_lock = threading.Lock()
         self._state_complete = threading.Event()
+        
+        # Online players
+        self.online_players = []
 
         # Response filters
         self._quiet_unmatched_srcs = {}
@@ -115,33 +119,44 @@ class EzServer:
                 print(f'Send error: {e}')
 
     def _route_message(self, msg_dict: dict) -> None:
+        """Route incoming messages to waiting handlers or general queue"""
         src = msg_dict.get('src')
+        
         if not src:
             self._general_queue.put(msg_dict)
             return
-
+        
+        # Match message with pending waiters
         waiters_to_remove = []
         matched = False
+        
         with self._waiter_lock:
-            for waiter_id, waiter in list(self._pending_waiters.items()):
+            for waiter_id, waiter in self._pending_waiters.items():
                 if waiter.matches(src):
                     waiter.add_message(msg_dict)
                     matched = True
                     if waiter.consume:
                         waiters_to_remove.append(waiter_id)
-
-            for waiter_id in waiters_to_remove:
-                # Consume one-shot waiters after delivering their message(s)
-                self._pending_waiters.pop(waiter_id, None)
-
-        if matched:
-            print(f'[INFO] Matched message: src="{src}", type={msg_dict.get("type")}, msg: {str(msg_dict.get("msg"))[:50]}...') 
-            #Shorter message for matched messages(U know what it should be)
+        
+        # Remove consumed waiters (outside lock for better performance)
+        if waiters_to_remove:
+            with self._waiter_lock:
+                for waiter_id in waiters_to_remove:
+                    self._pending_waiters.pop(waiter_id, None)
+        
+        # Log and handle based on match status
+        msg_preview_len = 50 if matched else 200
+        match_status = "Matched" if matched else "Unmatched"
+        print(f'[INFO] {match_status} message: src="{src}", type={msg_dict.get("type")}, '
+            f'msg: {str(msg_dict.get("msg"))[:msg_preview_len]}...')
+        
+        # Only queue unmatched messages, trying auto-processing first
         if not matched:
-            # Fallback queue keeps unmatched responses for general consumers
-            print(f'[INFO] Unmatched message: src="{src}", type={msg_dict.get("type")}, msg: {str(msg_dict.get("msg"))[:200]}...')
             if src in self._auto_process_srcs:
-                self._auto_process_message(msg_dict)
+                auto_processed = self._auto_process_message(msg_dict)
+                if auto_processed:
+                    return  # Don't queue if successfully auto-processed
+            
             self._general_queue.put(msg_dict)
 
     def _cleanup_expired_waiters(self) -> None:
@@ -274,43 +289,119 @@ class EzServer:
             self.server.close()
         print('Server stopped')
     
-    def _auto_process_message(self, msg_dict: dict) -> None:
-        """Auto-process message if it matches the auto_process_srcs
-        Currently unused.
-        """
+    def _auto_process_message(self, msg_dict: dict) -> bool:
+        """Auto-process message if it matches the auto_process_srcs"""
         src = msg_dict.get("src")
-        raw_msg = msg_dict.get("msg")
-        #Registed regular expression to filter message
+        
+        # Only process OnChatMsg events
+        if src != "OnChatMsg":
+            return False
+        
+        # Extract message content
+        msg_content = msg_dict.get("msg")
+        if not isinstance(msg_content, dict):
+            return False
+        
+        # Log if auto-processing is enabled
+        if src in self._auto_process_srcs:
+            print(f'[INFO] Auto-processing message: src="{src}", type={msg_dict.get("type")}, msg: {str(msg_content)[:200]}...')
+        
+        # Extract player info
+        id_dict = msg_content.get("id", {})
+        steam_id = id_dict.get("Value")
+        msg = msg_content.get("msg", "")
+        
+        # Regular expressions for event matching
         re_connected = r'^\$log_(.+?) has connected\.$'
         re_disconnected = r'^\$log_(.+?) has disconnected\.$'
         re_kill_event = r'^\$log_([\w ]+?) killed ([A-Za-z0-9/\-]+) \(([^()]+)\) with ([A-Za-z0-9\-]+)\.$'
-        if src == "OnChatMsg":
-            #raw_msg is also a dict
-            id_dict = raw_msg.get("id") #this is also a dict ...
-            steam_id = id_dict.get("Value") #Main key for database
-            msg = raw_msg.get("msg")
-            re_msg = re.match(re_connected, msg)
-            m = re.match(re_connected, msg)
-            if m:
-                regist_playername = m.group(1)
-                regist_steam_id = steam_id
-                print(f'[INFO] Connected: {regist_playername}')
-
-            elif m := re.match(re_disconnected, msg):
-                print(f'[INFO] Disconnected: {m.group(1)}')
-
-            elif m := re.match(re_kill_event, msg):
-                kill_playername = m.group(1)
-                kill_aircraft   = m.group(2)
-                kill_faction    = m.group(3)
-                kill_weapon     = m.group(4)
-                print(f'[INFO] Kill Event: {kill_playername} killed {kill_aircraft} ({kill_faction}) with {kill_weapon}')
-                print(kill_playername, kill_aircraft, kill_faction, kill_weapon)
-
-        if src in self._auto_process_srcs:
-            print(f'[INFO] Auto-processing message: src="{src}", type={msg_dict.get("type")}, msg: {str(msg_dict.get("msg"))[:200]}...')
-            return True
+        
+        # Handle connection event
+        if m := re.match(re_connected, msg):
+            return self._handle_player_connected(m.group(1), steam_id)
+        
+        # Handle disconnection event
+        elif m := re.match(re_disconnected, msg):
+            return self._handle_player_disconnected(m.group(1), steam_id)
+        
+        # Handle kill event
+        elif m := re.match(re_kill_event, msg):
+            return self._handle_kill_event(
+                m.group(1),  # killer name
+                m.group(2),  # aircraft
+                m.group(3),  # faction
+                m.group(4)   # weapon
+            )
+        
         return False
+
+    def _handle_player_connected(self, playername: str, steam_id: str) -> bool:
+        """Handle player connection event"""
+        # Check if player already online (by steam_id, not name)
+        if any(p["steam_id"] == steam_id for p in self.online_players):
+            print(f'[ERROR] Player {playername} (ID: {steam_id}) already connected')
+            return False
+        
+        # Add player
+        player_dict = {
+            "playername": playername,
+            "steam_id": steam_id,
+            "in_game_elo": 2000
+        }
+        self.online_players.append(player_dict)
+        
+        print(f'[Event] Connected: {playername}')
+        self._print_online_players()
+        return True
+
+    def _handle_player_disconnected(self, playername: str, steam_id: str) -> bool:
+        """Handle player disconnection event"""
+        # Find and remove player (safer than modifying during iteration)
+        self.online_players = [
+            p for p in self.online_players 
+            if p["steam_id"] != steam_id
+        ]
+        
+        print(f'[Event] Disconnected: {playername}')
+        self._print_online_players()
+        return True
+
+    def _handle_kill_event(self, killer_name: str, aircraft: str, faction: str, weapon: str) -> bool:
+        """Handle kill event and update ELO"""
+        try:
+            delta = EloSystem.calculate_elo_change_from_log(
+                killer_name, aircraft, faction, weapon
+            )
+            
+            print(f'[Event] Kill Event: {killer_name} killed {aircraft} ({faction}) with {weapon}')
+            
+            # Update player ELO
+            player_found = False
+            for player in self.online_players:
+                if player["playername"] == killer_name:
+                    player["in_game_elo"] += delta
+                    player_found = True
+                    break
+            
+            if not player_found:
+                print(f'[WARNING] Killer {killer_name} not found in online players')
+            
+            # Send log to server
+            log_msg = f"{killer_name} killed {aircraft} ({faction}) with {weapon} - Elo change: {delta}"
+            self.send_message(f"sendlog {log_msg}")
+            
+            return True
+            
+        except Exception as e:
+            print(f'[ERROR] Error processing kill event: {e}')
+            return False
+
+    def _print_online_players(self):
+        """Helper to print current online players"""
+        print(f"[INFO] Online Players: ")
+        for player in self.online_players:
+            print(f"  {player['playername']} ({player['steam_id']}) - ELO: {player['in_game_elo']}")
+
 server = EzServer()
 S2MS = 1000
 MIN2MS = 60 * S2MS
