@@ -401,6 +401,7 @@ class EzServer:
             player_found_victim = False
             for player_killer in self.online_players:
                 if player_killer["playername"] == killer_name:
+                    killer_elo = player_killer["in_game_elo"]
                     player_killer["ingame_elo_history"].append(delta)
                     sum_elo_killer = sum(player_killer["ingame_elo_history"])
                     player_found_killer = True
@@ -410,6 +411,7 @@ class EzServer:
                 print(f'[WARNING] Killer {killer_name} not found in online players')
             for player_victim in self.online_players:
                 if player_victim["playername"] == victim:
+                    victim_elo = player_victim["in_game_elo"]
                     player_victim["ingame_elo_history"].append(-delta)
                     sum_elo_victim = sum(player_victim["ingame_elo_history"])
                     player_found_victim = True
@@ -419,9 +421,9 @@ class EzServer:
                 print(f'[WARNING] Victim {victim} not found in online players')
             
             # Send log to server
-            log_msg_killer = f"ELO Change:{killer_name} +{delta}; New ELO: {sum_elo_killer}"
+            log_msg_killer = f"ELO Change:{killer_name} +{delta}; New ELO: {sum_elo_killer+killer_elo}"
             self.send_message(f"sendlog {log_msg_killer}")
-            log_msg_victim = f"ELO Change:{victim} -{delta}; New ELO: {sum_elo_victim}"
+            log_msg_victim = f"ELO Change:{victim} -{delta}; New ELO: {sum_elo_victim+victim_elo}"
             self.send_message(f"sendlog {log_msg_victim}")
 
             # Add event to global event history

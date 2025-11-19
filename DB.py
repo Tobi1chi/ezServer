@@ -204,4 +204,8 @@ db_flightlog = flightlogDB()
 
 if __name__ == "__main__":
     db_flightlog.init_db()
+    conn = db_flightlog.get_conn()
+    cur = conn.cursor()
+    print(cur.execute("PRAGMA table_info(players)").fetchall())
+    conn.close()
     print(f"数据库初始化完成：{DB_PATH}")
