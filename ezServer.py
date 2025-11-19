@@ -14,6 +14,8 @@ from Timer import tm
 import random
 import re #using re to filter message
 from EloSystem import EloSystem
+from DB import flightlogDB, db_flightlog
+
 # 设置控制台输出为 UTF-8 编码
 if sys.platform == 'win32':
     sys.stdout.reconfigure(encoding='utf-8')
@@ -64,6 +66,19 @@ class EzServer:
         # Response filters
         self._quiet_unmatched_srcs = {}
         self._auto_process_srcs = {"OnChatMsg"}
+        self.global_event_history = []
+        self.global_event_history_template = {
+            "event_type": "",
+            "datetime": "",
+            "killer_id": "",
+            "killer_name": "",
+            "killer_aircraft": "",
+            "victim_id": "",
+            "victim_name": "",
+            "victim_aircraft": "",
+            "weapon": "",
+            "elo_delta": 0,
+        }
 
     def receive_messages(self):
         buffer = ""
@@ -309,6 +324,7 @@ class EzServer:
         # Extract player info
         id_dict = msg_content.get("id", {})
         steam_id = id_dict.get("Value")
+        steam_name = msg_content.get("name", "")
         msg = msg_content.get("msg", "")
         
         # Regular expressions for event matching
@@ -318,7 +334,7 @@ class EzServer:
         
         # Handle connection event
         if m := re.match(re_connected, msg):
-            return self._handle_player_connected(m.group(1), steam_id)
+            return self._handle_player_connected(m.group(1), steam_id, steam_name)
         
         # Handle disconnection event
         elif m := re.match(re_disconnected, msg):
@@ -329,24 +345,28 @@ class EzServer:
             return self._handle_kill_event(
                 m.group(1),  # killer name
                 m.group(2),  # aircraft
-                m.group(3),  # faction
+                m.group(3),  # victim name
                 m.group(4)   # weapon
             )
         
         return False
 
-    def _handle_player_connected(self, playername: str, steam_id: str) -> bool:
+    def _handle_player_connected(self, playername: str, steam_id: str, steam_name: str) -> bool:
         """Handle player connection event"""
         # Check if player already online (by steam_id, not name)
+        map_type = "BVR"
         if any(p["steam_id"] == steam_id for p in self.online_players):
             print(f'[ERROR] Player {playername} (ID: {steam_id}) already connected')
             return False
         
         # Add player
+        player_db = db_flightlog.player_join(steam_id, steam_name, playername)
         player_dict = {
             "playername": playername,
             "steam_id": steam_id,
-            "in_game_elo": 2000
+            "in_game_elo": player_db.get(f"current_elo_{map_type}"),
+            "ingame_elo_history": [],
+            "connected": True
         }
         self.online_players.append(player_dict)
         
@@ -358,40 +378,66 @@ class EzServer:
         """Handle player disconnection event"""
         # Find and remove player (safer than modifying during iteration)
         #using playername to find player instead of steam id
-        self.online_players = [
-            p for p in self.online_players 
-            if p["playername"] != playername
-        ]
+        player_dict = next((p for p in self.online_players if p["playername"] == playername), None)
+        if player_dict:
+            player_dict["connected"] = False
+            print(f'[Event] Disconnected: {playername}')
+            self._print_online_players()
+            return True
+        else:
+            print(f'[ERROR] Player {playername} not found')
+            return False
         
-        print(f'[Event] Disconnected: {playername}')
-        self._print_online_players()
-        return True
-
-    def _handle_kill_event(self, killer_name: str, aircraft: str, faction: str, weapon: str) -> bool:
+    def _handle_kill_event(self, killer_name: str, aircraft: str, victim: str, weapon: str) -> bool:
         """Handle kill event and update ELO"""
         try:
             delta = EloSystem.calculate_elo_change_from_log(
-                killer_name, aircraft, faction, weapon
+                killer_name, aircraft, victim, weapon
             )
             
-            print(f'[Event] Kill Event: {killer_name} killed {aircraft} ({faction}) with {weapon}')
-            new_elo = 0 # initial new elo
+            print(f'[Event] Kill Event: {killer_name} killed {aircraft} ({victim}) with {weapon}')
             # Update player ELO
-            player_found = False
-            for player in self.online_players:
-                if player["playername"] == killer_name:
-                    player["in_game_elo"] += delta
-                    new_elo = player["in_game_elo"]
-                    player_found = True
+            player_found_killer = False
+            player_found_victim = False
+            for player_killer in self.online_players:
+                if player_killer["playername"] == killer_name:
+                    player_killer["ingame_elo_history"].append(delta)
+                    sum_elo_killer = sum(player_killer["ingame_elo_history"])
+                    player_found_killer = True
                     break
             
-            if not player_found:
+            if not player_found_killer:
                 print(f'[WARNING] Killer {killer_name} not found in online players')
+            for player_victim in self.online_players:
+                if player_victim["playername"] == victim:
+                    player_victim["ingame_elo_history"].append(-delta)
+                    sum_elo_victim = sum(player_victim["ingame_elo_history"])
+                    player_found_victim = True
+                    break
+            
+            if not player_found_victim:
+                print(f'[WARNING] Victim {victim} not found in online players')
             
             # Send log to server
-            log_msg = f"ELO Change:{killer_name} +{delta}; New ELO: {new_elo}"
-            self.send_message(f"sendlog {log_msg}")
-            
+            log_msg_killer = f"ELO Change:{killer_name} +{delta}; New ELO: {sum_elo_killer}"
+            self.send_message(f"sendlog {log_msg_killer}")
+            log_msg_victim = f"ELO Change:{victim} -{delta}; New ELO: {sum_elo_victim}"
+            self.send_message(f"sendlog {log_msg_victim}")
+
+            # Add event to global event history
+            new_event = self.global_event_history_template.copy()
+            new_event["event_type"] = "BVR_KILL"
+            new_event["datetime"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            new_event["killer_id"] = next((p for p in self.online_players if p["playername"] == killer_name), None)["steam_id"]
+            new_event["killer_name"] = killer_name
+            new_event["killer_aircraft"] = ""
+            new_event["victim_id"] = next((p for p in self.online_players if p["playername"] == victim), None)["steam_id"]
+            new_event["victim_name"] = victim
+            new_event["victim_aircraft"] = aircraft
+            new_event["weapon"] = weapon
+            new_event["elo_delta"] = delta
+            self.global_event_history.append(new_event)
+
             return True
             
         except Exception as e:
@@ -522,6 +568,10 @@ def end_state(state:str):
         msg_str = str(msg)
     with open(LOCAL_PATH/'Flightlog_Latest.json', "w", encoding='utf-8') as f:
         f.write(msg_str)
+
+
+
+    
     try:
         copy_folder(AUTOSAVE_PATH, LOCAL_PATH/"Replays"/f"{FSM_MAPS[state]['mapname']}_{timestamp}")
         with open(LOCAL_PATH/"Replays"/f"{FSM_MAPS[state]['mapname']}_{timestamp}/flightlog.json", "w", encoding='utf-8') as f:

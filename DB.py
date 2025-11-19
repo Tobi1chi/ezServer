@@ -1,3 +1,4 @@
+from operator import ge
 import sqlite3
 import os
 from pathlib import Path
@@ -120,6 +121,82 @@ class flightlogDB:
     )
         conn.commit()
         conn.close()
+
+    def get_player_by_steam_id(self, steam_id: str, steam_name: str, playername: str) -> Union[dict, None]:
+        conn = self.get_conn()
+        conn.row_factory = sqlite3.Row  # dict-like row
+        cur = conn.cursor()
+
+        # check if player exists
+        cur.execute("SELECT * FROM players WHERE steam_id = ?", (steam_id,))
+        row = cur.fetchone()
+
+        # if player exists, return player info
+        if row is not None:
+            player_id = row["id"]
+
+            # get player_names
+            name_row = cur.execute(
+                "SELECT * FROM player_names WHERE player_id = ?",
+                (player_id,)
+            ).fetchone()
+
+            if name_row:
+                name_list = json.loads(name_row["name"])
+            else:
+                # create new record
+                name_list = []
+
+            # if new name is not in the list, add it
+            if playername not in name_list:
+                name_list.append(playername)
+                cur.execute(
+                    "UPDATE player_names SET name = ? WHERE player_id = ?",
+                    (json.dumps(name_list), player_id)
+                )
+                conn.commit()
+
+            # return player info + history names
+            result = dict(row)
+            result["name_history"] = name_list
+
+            conn.close()
+            return result
+
+        # if player does not exist, create new player
+        cur.execute(
+            "INSERT INTO players (steam_id, steam_name) VALUES (?, ?)",
+            (steam_id, steam_name)
+        )
+        conn.commit()
+
+        # get new player
+        cur.execute("SELECT * FROM players WHERE steam_id = ?", (steam_id,))
+        new_row = cur.fetchone()
+        player_id = new_row["id"]
+
+        # initialize name history
+        name_list = [playername]
+        cur.execute(
+            "INSERT INTO player_names (player_id, name) VALUES (?, ?)",
+            (player_id, json.dumps(name_list))
+        )
+        conn.commit()
+
+        result = dict(new_row)
+        result["name_history"] = name_list
+
+        conn.close()
+        return result
+
+
+    def player_join(self, steam_id: str, steam_name: str,playername: str) -> dict:
+        #Add more things here if needed
+        player = self.get_player_by_steam_id(steam_id, steam_name, playername)
+        return player
+
+    
+
 
 
 
