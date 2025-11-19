@@ -28,7 +28,7 @@ class EloSystem:
     def set_elo(self, playername: str, elo: int) -> None:
         self.elo_dict[playername] = elo
     
-    def calculate_elo_change_from_log(kill_playername, kill_aircraft, kill_faction, kill_weapon) -> int:
+    def calculate_elo_change_from_log(self,kill_playername, kill_aircraft, kill_faction, kill_weapon) -> int:
         mult_weapon = WEAPON_ELO_MULTIPLIER.get(kill_weapon, 1.0)
         mult_aircraft = AIRCRAFT_ELO_MULTIPLIER.get(kill_aircraft, 1.0)
         total_mult = mult_weapon * mult_aircraft

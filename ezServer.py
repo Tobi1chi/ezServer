@@ -357,9 +357,10 @@ class EzServer:
     def _handle_player_disconnected(self, playername: str, steam_id: str) -> bool:
         """Handle player disconnection event"""
         # Find and remove player (safer than modifying during iteration)
+        #using playername to find player instead of steam id
         self.online_players = [
             p for p in self.online_players 
-            if p["steam_id"] != steam_id
+            if p["playername"] != playername
         ]
         
         print(f'[Event] Disconnected: {playername}')
@@ -374,12 +375,13 @@ class EzServer:
             )
             
             print(f'[Event] Kill Event: {killer_name} killed {aircraft} ({faction}) with {weapon}')
-            
+            new_elo = 0 # initial new elo
             # Update player ELO
             player_found = False
             for player in self.online_players:
                 if player["playername"] == killer_name:
                     player["in_game_elo"] += delta
+                    new_elo = player["in_game_elo"]
                     player_found = True
                     break
             
@@ -387,7 +389,7 @@ class EzServer:
                 print(f'[WARNING] Killer {killer_name} not found in online players')
             
             # Send log to server
-            log_msg = f"{killer_name} killed {aircraft} ({faction}) with {weapon} - Elo change: {delta}"
+            log_msg = f"ELO Change:{killer_name} +{delta}; New ELO: {new_elo}"
             self.send_message(f"sendlog {log_msg}")
             
             return True
@@ -408,7 +410,7 @@ MIN2MS = 60 * S2MS
 H2MS = 60 * MIN2MS
 H2S = 60 * 60
 
-SERVER_NAME = "PvP Server-60min mapcycle"
+SERVER_NAME = "24/7Ranked Server_Elo Test"
 SERVER_PASSWORD = "2025"
 PUBLIC = True
 UNIT_ICON = False
