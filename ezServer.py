@@ -4,7 +4,7 @@ import sys
 from pathlib import Path
 import shutil
 import time
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 import json
 import queue
 from collections import deque
@@ -79,7 +79,13 @@ class EzServer:
             "weapon": "",
             "elo_delta": 0,
         }
-
+        self.replay_info_template = {
+            "file_name": "",
+            "map_name": "",
+            "played_at": "",
+            "meta_blob": "",
+            "map_type": "",
+        }
     def receive_messages(self):
         buffer = ""
         while self.connected:
@@ -378,6 +384,7 @@ class EzServer:
         """Handle player disconnection event"""
         # Find and remove player (safer than modifying during iteration)
         #using playername to find player instead of steam id
+        #Also I'm not sure that this function is useful......but just in case...
         player_dict = next((p for p in self.online_players if p["playername"] == playername), None)
         if player_dict:
             player_dict["connected"] = False
@@ -394,7 +401,6 @@ class EzServer:
             delta = EloSystem.calculate_elo_change_from_log(
                 killer_name, aircraft, victim, weapon
             )
-            
             print(f'[Event] Kill Event: {killer_name} killed {aircraft} ({victim}) with {weapon}')
             # Update player ELO
             player_found_killer = False
@@ -429,7 +435,7 @@ class EzServer:
             # Add event to global event history
             new_event = self.global_event_history_template.copy()
             new_event["event_type"] = "BVR_KILL"
-            new_event["datetime"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            new_event["datetime"] = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S") #same format as the sqlite3 datetime format
             new_event["killer_id"] = next((p for p in self.online_players if p["playername"] == killer_name), None)["steam_id"]
             new_event["killer_name"] = killer_name
             new_event["killer_aircraft"] = ""
@@ -470,14 +476,14 @@ RAND_MODE = False
 
 
 FSM_MAPS: dict = {
-    "state1": {"campaign_id":"2860956181", "mapname":"BVR Ethi5"},
-    "state2": {"campaign_id":"3355613749", "mapname":"MergeLarge"},
-    "state3": {"campaign_id":"2860956181", "mapname":"BVR Archipel"},
-    "state4": {"campaign_id":"2860956181", "mapname":"BVR Ocixem"},
-    "state5": {"campaign_id":"2860956181", "mapname":"BVR Crack"},
-    "state6": {"campaign_id":"2860956181", "mapname":"BVR afMtnsHills"},
-    "state7": {"campaign_id":"3583755382", "mapname":"Dragon's Valley"},
-    "state8": {"campaign_id":"3583755382", "mapname":"Fjord Coast"},
+    "state1": {"campaign_id":"2860956181", "mapname":"BVR Ethi5", "map_type":"BVR"},
+    "state2": {"campaign_id":"3355613749", "mapname":"MergeLarge", "map_type":"BFM"},
+    "state3": {"campaign_id":"2860956181", "mapname":"BVR Archipel", "map_type":"BVR"},
+    "state4": {"campaign_id":"2860956181", "mapname":"BVR Ocixem", "map_type":"BVR"},
+    "state5": {"campaign_id":"2860956181", "mapname":"BVR Crack", "map_type":"BVR"},
+    "state6": {"campaign_id":"2860956181", "mapname":"BVR afMtnsHills", "map_type":"BVR"},
+    "state7": {"campaign_id":"3583755382", "mapname":"Dragon's Valley", "map_type":"BVR"},
+    "state8": {"campaign_id":"3583755382", "mapname":"Fjord Coast", "map_type":"BVR"},
 }
 
 def init_server(state:str):
@@ -513,8 +519,9 @@ def restart_server(state:str):
 
 
 def end_state(state:str):
+    online_players = server.online_players #save online players list to local variable
     server.send_message("skip")
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
     try:
         responses = server.send_and_wait("flightlog", "GetFlightLog", timeout=10)
         raw = responses[0]
@@ -563,17 +570,23 @@ def end_state(state:str):
     print("flightlog msg:")
     for log in msg:
         print(log)
-    # 如果 msg 是列表或字典，转换为 JSON 字符串；如果已经是字符串，直接使用
-    if isinstance(msg, (list, dict)):
-        msg_str = json.dumps(msg, ensure_ascii=False, indent=2)
+    #remove adjacent duplicates
+    def remove_adjacent_duplicates(lst):
+        result = []
+        for x in lst:
+            if not result or result[-1] != x:
+                result.append(x)
+        return result
+    #washed flightlog
+    msg_new = remove_adjacent_duplicates(msg)
+    #save flightlog
+    if isinstance(msg_new, (list, dict)):
+        msg_str = json.dumps(msg_new, ensure_ascii=False, indent=2)
     else:
-        msg_str = str(msg)
+        msg_str = str(msg_new)
     with open(LOCAL_PATH/'Flightlog_Latest.json', "w", encoding='utf-8') as f:
         f.write(msg_str)
 
-
-
-    
     try:
         copy_folder(AUTOSAVE_PATH, LOCAL_PATH/"Replays"/f"{FSM_MAPS[state]['mapname']}_{timestamp}")
         with open(LOCAL_PATH/"Replays"/f"{FSM_MAPS[state]['mapname']}_{timestamp}/flightlog.json", "w", encoding='utf-8') as f:
@@ -590,6 +603,21 @@ def end_state(state:str):
             f.write(msg_str)
         zip_folder(LOCAL_PATH/"Replays"/f"{FSM_MAPS[state]['mapname']}_{timestamp}", LOCAL_PATH/"Replays"/f"{FSM_MAPS[state]['mapname']}_{timestamp}.zip")
         delete_folder(LOCAL_PATH/"Replays"/f"{FSM_MAPS[state]['mapname']}_{timestamp}")
+
+    finally:
+        #replay info
+        with open(LOCAL_PATH/"Replays"/f"{FSM_MAPS[state]['mapname']}_{timestamp}.zip","rb",) as f:
+            meta_blob = f.read()
+        replay_info = server.replay_info_template.copy()
+        replay_info["file_name"] = f"{FSM_MAPS[state]['mapname']}_{timestamp}.zip"
+        replay_info["map_name"] = FSM_MAPS[state]['mapname']
+        replay_info["played_at"] = timestamp
+        replay_info["meta_blob"] = meta_blob
+        replay_info["map_type"] = FSM_MAPS[state]['map_type']
+        #save global event history
+        if server.global_event_history:
+            db_flightlog.save_global_event_history(server.global_event_history, replay_info, msg_new)
+            db_flightlog.update_player_elo(online_players, FSM_MAPS[state]['map_type'])
 
 def zip_folder(folder: Path, out_zip: Path):
     shutil.make_archive(str(out_zip), "zip", str(folder.parent), folder.name)
