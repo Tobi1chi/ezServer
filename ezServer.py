@@ -359,13 +359,24 @@ class EzServer:
 
     def _handle_player_connected(self, playername: str, steam_id: str, steam_name: str) -> bool:
         """Handle player connection event"""
-        # Check if player already online (by steam_id, not name)
         map_type = "BVR"
-        if any(p["steam_id"] == steam_id for p in self.online_players):
-            print(f'[ERROR] Player {playername} (ID: {steam_id}) already connected')
-            return False
-        
-        # Add player
+
+        # 先查有没有这个 steam_id
+        existing = next((p for p in self.online_players if p["steam_id"] == steam_id), None)
+
+        if existing:
+            if existing["connected"]:
+                print(f'[ERROR] Player {playername} (ID: {steam_id}) already connected')
+                return False
+            # 之前在列表里，但标记为断线；现在重新连上
+            existing["connected"] = True
+            existing["playername"] = playername      # 名字可能变了，顺便更新
+            # 如有需要也可以在这里更新 elo
+            print(f'[Event] Reconnected: {playername}')
+            self._print_online_players()
+            return True
+
+        # Add new player to DB
         player_db = db_flightlog.player_join(steam_id, steam_name, playername)
         player_dict = {
             "playername": playername,
@@ -375,10 +386,12 @@ class EzServer:
             "connected": True
         }
         self.online_players.append(player_dict)
-        
+
         print(f'[Event] Connected: {playername}')
         self._print_online_players()
         return True
+
+
 
     def _handle_player_disconnected(self, playername: str, steam_id: str) -> bool:
         """Handle player disconnection event"""
@@ -388,12 +401,12 @@ class EzServer:
         player_dict = next((p for p in self.online_players if p["playername"] == playername), None)
         if player_dict:
             player_dict["connected"] = False
-            print(f'[Event] Disconnected: {playername}')
+                # 名字用列表里的也可以，这里随你
+            print(f'[Event] Disconnected: {player_dict['playername']}')
             self._print_online_players()
             return True
-        else:
-            print(f'[ERROR] Player {playername} not found')
-            return False
+        print(f'[ERROR] Player {playername} not found in online players')
+        return False
         
     def _handle_kill_event(self, killer_name: str, aircraft: str, victim: str, weapon: str) -> bool:
         """Handle kill event and update ELO"""
@@ -521,7 +534,7 @@ def restart_server(state:str):
 def end_state(state:str):
     online_players = server.online_players #save online players list to local variable
     server.send_message("skip")
-    timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
     try:
         responses = server.send_and_wait("flightlog", "GetFlightLog", timeout=10)
         raw = responses[0]

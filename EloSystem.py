@@ -9,11 +9,13 @@ WEAPON_ELO_MULTIPLIER = {
     "Vulcan": 20.0,
     "AIM-7": 8.0,
     "AIM-9E": 30.0, #I'm not sure it's 9e or 9E......
+    "GAU-22": 20.0,
+    "M230": 20.0,
 } #Using fixed multiplier currently to calculate elo change
 AIRCRAFT_ELO_MULTIPLIER = {
     "F/A-26B": 4.0,
     "EF-24G": 8.0,
-    "F45-A": 8.0,
+    "F-45A": 8.0,
     "T-55": 2.0,
     "AV-42C": 1.0,
 }
