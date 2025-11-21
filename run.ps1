@@ -5,17 +5,21 @@ $OutputEncoding = [System.Text.Encoding]::UTF8
 # 切换到脚本所在目录
 Set-Location $PSScriptRoot
 
-# 运行 Python 脚本
-Start-Process py "ezServer.py"
-Start-Process telnet "127.0.0.1 23232"
+# Using virtual environment
+$VENV_PY = Join-Path $PSScriptRoot "venv\Scripts\python.exe"
 
-#change directory to ollama server
+# Run ezServer.py
+Start-Process $VENV_PY "ezServer.py"
+Start-Process $VENV_PY "Discord_bot\bot.py"
+# Run telnet
+Start-Process "telnet" "127.0.0.1 23232"
+
+# Switch to ollama
 Set-Location -Path "D:\ollama\ollama-windows-amd64"
 
-#start ollama server
-Start-Process ./ollama.exe "serve"
+Start-Process "./ollama.exe" "serve"
 
-# 等待用户按键
-Write-Host "`n按任意键继续..."
+Write-Host "`nPress any key to continue..."
 $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
+
 
