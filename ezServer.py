@@ -14,7 +14,7 @@ from Timer import tm
 import random
 import re #using re to filter message
 from EloSystem import EloSystem
-from DB import flightlogDB, db_flightlog
+from DB import db_flightlog
 
 # 设置控制台输出为 UTF-8 编码
 if sys.platform == 'win32':
@@ -475,7 +475,10 @@ server = EzServer()
 S2MS = 1000
 MIN2MS = 60 * S2MS
 H2MS = 60 * MIN2MS
-H2S = 60 * 60
+H2S = 60 * 13 #13minutes for test
+
+TEST_TIME = 1
+
 
 SERVER_NAME = "24/7Ranked Server_Elo Test"
 SERVER_PASSWORD = "2025"
@@ -604,7 +607,7 @@ def end_state(state:str):
         copy_folder(AUTOSAVE_PATH, LOCAL_PATH/"Replays"/f"{FSM_MAPS[state]['mapname']}_{timestamp}")
         with open(LOCAL_PATH/"Replays"/f"{FSM_MAPS[state]['mapname']}_{timestamp}/flightlog.json", "w", encoding='utf-8') as f:
             f.write(msg_str)
-        zip_folder(LOCAL_PATH/"Replays"/f"{FSM_MAPS[state]['mapname']}_{timestamp}", LOCAL_PATH/"Replays"/f"{FSM_MAPS[state]['mapname']}_{timestamp}.zip")
+        zip_folder(LOCAL_PATH/"Replays"/f"{FSM_MAPS[state]['mapname']}_{timestamp}", LOCAL_PATH/"Replays"/f"{FSM_MAPS[state]['mapname']}_{timestamp}")
         delete_folder(LOCAL_PATH/"Replays"/f"{FSM_MAPS[state]['mapname']}_{timestamp}")
         delete_folder(AUTOSAVE_PATH)
 
@@ -614,7 +617,7 @@ def end_state(state:str):
         create_folder(LOCAL_PATH/"Replays"/f"{FSM_MAPS[state]['mapname']}_{timestamp}")
         with open(LOCAL_PATH/"Replays"/f"{FSM_MAPS[state]['mapname']}_{timestamp}/flightlog.json", "w", encoding='utf-8') as f:
             f.write(msg_str)
-        zip_folder(LOCAL_PATH/"Replays"/f"{FSM_MAPS[state]['mapname']}_{timestamp}", LOCAL_PATH/"Replays"/f"{FSM_MAPS[state]['mapname']}_{timestamp}.zip")
+        zip_folder(LOCAL_PATH/"Replays"/f"{FSM_MAPS[state]['mapname']}_{timestamp}", LOCAL_PATH/"Replays"/f"{FSM_MAPS[state]['mapname']}_{timestamp}") #.zip is added in the function
         delete_folder(LOCAL_PATH/"Replays"/f"{FSM_MAPS[state]['mapname']}_{timestamp}")
 
     finally:
