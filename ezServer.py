@@ -478,7 +478,7 @@ server = EzServer()
 S2MS = 1000
 MIN2MS = 60 * S2MS
 H2MS = 60 * MIN2MS
-H2S = 60 * 13 #13minutes for test
+H2S = 60 * 60 
 
 TEST_TIME = 1
 
@@ -639,6 +639,9 @@ def end_state(state:str):
         if server.global_event_history:
             db_flightlog.save_global_event_history(server.global_event_history, replay_info, msg_new)
             db_flightlog.update_player_elo(online_players, FSM_MAPS[state]['map_type'])
+            server.global_event_history.clear()
+            server.online_players.clear()
+            
 
 def zip_folder(folder: Path, out_zip: Path):
     shutil.make_archive(str(out_zip), "zip", str(folder.parent), folder.name)
@@ -696,7 +699,7 @@ def _state1():
 
 def _state2():
     global count_num
-    duration = 1 * H2S
+    duration = 1 * 20 * 60 #20 minutes
     time_prepare = 60 #time for read briefing
     print("State 2\n")
     print(f"count_num: {count_num}\n")

@@ -6,7 +6,14 @@ $OutputEncoding = [System.Text.Encoding]::UTF8
 Set-Location $PSScriptRoot
 
 # 运行 Python 脚本
-py ezServer.py
+Start-Process py "ezServer.py"
+Start-Process telnet "127.0.0.1 23232"
+
+#change directory to ollama server
+Set-Location -Path "D:\ollama\ollama-windows-amd64"
+
+#start ollama server
+Start-Process ./ollama.exe "serve"
 
 # 等待用户按键
 Write-Host "`n按任意键继续..."

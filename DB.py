@@ -7,7 +7,8 @@ import json
 import datetime
 import re 
 from EloSystem import WEAPON_ELO_MULTIPLIER, AIRCRAFT_ELO_MULTIPLIER
-from ezServer import DEBUG
+
+DEBUG = False
 FLIGHTLOG_DB_PATH = Path(__file__).parent /"DataBase"/"flightlogDB.sqlite"
 TEST_PATH = Path(__file__).parent /"MergeLarge_20251114_120521"/"flightlog.json"
 DB_DIR = Path(__file__).parent /"DataBase"
