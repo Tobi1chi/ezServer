@@ -4,7 +4,7 @@ import sys
 from pathlib import Path
 import shutil
 import time
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 import json
 import queue
 from collections import deque
@@ -13,6 +13,9 @@ from typing import Callable, Dict, Set, Union
 from Timer import tm
 import random
 import re #using re to filter message
+from EloSystem import EloSystem
+from DB import db_flightlog
+
 # 设置控制台输出为 UTF-8 编码
 if sys.platform == 'win32':
     sys.stdout.reconfigure(encoding='utf-8')
@@ -56,11 +59,33 @@ class EzServer:
         self._general_queue: queue.Queue = queue.Queue()
         self._waiter_lock = threading.Lock()
         self._state_complete = threading.Event()
-
+        
+        # Online players
+        self.online_players = []
+        self.current_state = ""
         # Response filters
         self._quiet_unmatched_srcs = {}
         self._auto_process_srcs = {"OnChatMsg"}
-
+        self.global_event_history = []
+        self.global_event_history_template = {
+            "event_type": "",
+            "datetime": "",
+            "killer_id": "",
+            "killer_name": "",
+            "killer_aircraft": "",
+            "victim_id": "",
+            "victim_name": "",
+            "victim_aircraft": "",
+            "weapon": "",
+            "elo_delta": 0,
+        }
+        self.replay_info_template = {
+            "file_name": "",
+            "map_name": "",
+            "played_at": "",
+            "meta_blob": "",
+            "map_type": "",
+        }
     def receive_messages(self):
         buffer = ""
         while self.connected:
@@ -115,32 +140,44 @@ class EzServer:
                 print(f'Send error: {e}')
 
     def _route_message(self, msg_dict: dict) -> None:
+        """Route incoming messages to waiting handlers or general queue"""
         src = msg_dict.get('src')
+        
         if not src:
             self._general_queue.put(msg_dict)
             return
-
+        
+        # Match message with pending waiters
         waiters_to_remove = []
         matched = False
+        
         with self._waiter_lock:
-            for waiter_id, waiter in list(self._pending_waiters.items()):
+            for waiter_id, waiter in self._pending_waiters.items():
                 if waiter.matches(src):
                     waiter.add_message(msg_dict)
                     matched = True
                     if waiter.consume:
                         waiters_to_remove.append(waiter_id)
-
-            for waiter_id in waiters_to_remove:
-                # Consume one-shot waiters after delivering their message(s)
-                self._pending_waiters.pop(waiter_id, None)
-
-        if matched:
-            print(f'[INFO] Matched message: src="{src}", type={msg_dict.get("type")}, msg: {str(msg_dict.get("msg"))[:50]}...') 
-            #Shorter message for matched messages(U know what it should be)
-            return
+        
+        # Remove consumed waiters (outside lock for better performance)
+        if waiters_to_remove:
+            with self._waiter_lock:
+                for waiter_id in waiters_to_remove:
+                    self._pending_waiters.pop(waiter_id, None)
+        
+        # Log and handle based on match status
+        msg_preview_len = 50 if matched else 200
+        match_status = "Matched" if matched else "Unmatched"
+        print(f'[INFO] {match_status} message: src="{src}", type={msg_dict.get("type")}, '
+            f'msg: {str(msg_dict.get("msg"))[:msg_preview_len]}...')
+        
+        # Only queue unmatched messages, trying auto-processing first
         if not matched:
-            # Fallback queue keeps unmatched responses for general consumers
-            print(f'[INFO] Unmatched message: src="{src}", type={msg_dict.get("type")}, msg: {str(msg_dict.get("msg"))[:200]}...')
+            if src in self._auto_process_srcs:
+                auto_processed = self._auto_process_message(msg_dict)
+                if auto_processed:
+                    return  # Don't queue if successfully auto-processed
+            
             self._general_queue.put(msg_dict)
 
     def _cleanup_expired_waiters(self) -> None:
@@ -273,28 +310,180 @@ class EzServer:
             self.server.close()
         print('Server stopped')
     
-    def _auto_process_message(self, msg_dict: dict) -> None:
-        """Auto-process message if it matches the auto_process_srcs
-        Currently unused.
-        """
-        #Registed regular expression to filter message
+    def _auto_process_message(self, msg_dict: dict) -> bool:
+        """Auto-process message if it matches the auto_process_srcs"""
+        src = msg_dict.get("src")
+        
+        # Only process OnChatMsg events
+        if src != "OnChatMsg":
+            return False
+        
+        # Extract message content
+        msg_content = msg_dict.get("msg")
+        if not isinstance(msg_content, dict):
+            return False
+        
+        # Log if auto-processing is enabled
+        if src in self._auto_process_srcs:
+            print(f'[INFO] Auto-processing message: src="{src}", type={msg_dict.get("type")}, msg: {str(msg_content)[:200]}...')
+        
+        # Extract player info
+        id_dict = msg_content.get("id", {})
+        steam_id = id_dict.get("Value")
+        steam_name = msg_content.get("name", "")
+        msg = msg_content.get("msg", "")
+        
+        # Regular expressions for event matching
         re_connected = r'^\$log_(.+?) has connected\.$'
         re_disconnected = r'^\$log_(.+?) has disconnected\.$'
+        re_kill_event = r'^\$log_([\w ]+?) killed ([A-Za-z0-9/\-]+) \(([^()]+)\) with ([A-Za-z0-9\-]+)\.$'
         
-
-
-        src = msg_dict.get("src")
-        if src in self._auto_process_srcs:
-            print(f'[INFO] Auto-processing message: src="{src}", type={msg_dict.get("type")}, msg: {str(msg_dict.get("msg"))[:200]}...')
-            return True
+        # Handle connection event
+        if m := re.match(re_connected, msg):
+            return self._handle_player_connected(m.group(1), steam_id, steam_name)
+        
+        # Handle disconnection event
+        elif m := re.match(re_disconnected, msg):
+            return self._handle_player_disconnected(m.group(1), steam_id)
+        
+        # Handle kill event
+        elif m := re.match(re_kill_event, msg):
+            return self._handle_kill_event(
+                m.group(1),  # killer name
+                m.group(2),  # aircraft
+                m.group(3),  # victim name
+                m.group(4)   # weapon
+            )
+        
         return False
+
+    def _handle_player_connected(self, playername: str, steam_id: str, steam_name: str) -> bool:
+        """Handle player connection event"""
+        current_state = self.current_state
+        map_type = FSM_MAPS[current_state]['map_type']
+        if DEBUG :print(f"[DEBUG] Current state: {map_type}")
+        # 先查有没有这个 steam_id
+        existing = next((p for p in self.online_players if p["steam_id"] == steam_id), None)
+
+        if existing:
+            if existing["connected"]:
+                print(f'[ERROR] Player {playername} (ID: {steam_id}) already connected')
+                return False
+            # 之前在列表里，但标记为断线；现在重新连上
+            existing["connected"] = True
+            existing["playername"] = playername      # 名字可能变了，顺便更新
+            # 如有需要也可以在这里更新 elo
+            print(f'[Event] Reconnected: {playername}')
+            self._print_online_players()
+            return True
+
+        # Add new player to DB
+        player_db = db_flightlog.player_join(steam_id, steam_name, playername)
+        player_dict = {
+            "playername": playername,
+            "steam_id": steam_id,
+            "in_game_elo": player_db.get(f"current_elo_{map_type}"),
+            "ingame_elo_history": [],
+            "connected": True
+        }
+        self.online_players.append(player_dict)
+
+        print(f'[Event] Connected: {playername}')
+        print(player_db)
+        if DEBUG :print(f"[DEBUG] Online Players: {self.online_players}")
+        self._print_online_players()
+        return True
+
+
+
+    def _handle_player_disconnected(self, playername: str, steam_id: str) -> bool:
+        """Handle player disconnection event"""
+        # Find and remove player (safer than modifying during iteration)
+        #using playername to find player instead of steam id
+        #Also I'm not sure that this function is useful......but just in case...
+        player_dict = next((p for p in self.online_players if p["playername"] == playername), None)
+        if player_dict:
+            player_dict["connected"] = False
+                # 名字用列表里的也可以，这里随你
+            print(f'[Event] Disconnected: {player_dict['playername']}')
+            self._print_online_players()
+            return True
+        print(f'[ERROR] Player {playername} not found in online players')
+        return False
+        
+    def _handle_kill_event(self, killer_name: str, aircraft: str, victim: str, weapon: str) -> bool:
+        """Handle kill event and update ELO"""
+        try:
+            delta = EloSystem.calculate_elo_change_from_log(
+                killer_name, aircraft, victim, weapon, FSM_MAPS[self.current_state]['map_type']
+            )
+            print(f'[Event] Kill Event: {killer_name} killed {aircraft} ({victim}) with {weapon}')
+            # Update player ELO
+            player_found_killer = False
+            player_found_victim = False
+            for player_killer in self.online_players:
+                if player_killer["playername"] == killer_name:
+                    killer_elo = player_killer["in_game_elo"]
+                    player_killer["ingame_elo_history"].append(delta)
+                    sum_elo_killer = sum(player_killer["ingame_elo_history"])
+                    player_found_killer = True
+                    break
+            
+            if not player_found_killer:
+                print(f'[WARNING] Killer {killer_name} not found in online players')
+            for player_victim in self.online_players:
+                if player_victim["playername"] == victim:
+                    victim_elo = player_victim["in_game_elo"]
+                    player_victim["ingame_elo_history"].append(-delta)
+                    sum_elo_victim = sum(player_victim["ingame_elo_history"])
+                    player_found_victim = True
+                    break
+            
+            if not player_found_victim:
+                print(f'[WARNING] Victim {victim} not found in online players')
+            
+            # Send log to server
+            log_msg_killer = f"ELO Change:{killer_name} +{delta}; New ELO: {sum_elo_killer+killer_elo}"
+            self.send_message(f"sendlog {log_msg_killer}")
+            log_msg_victim = f"ELO Change:{victim} -{delta}; New ELO: {sum_elo_victim+victim_elo}"
+            self.send_message(f"sendlog {log_msg_victim}")
+
+            # Add event to global event history
+            new_event = self.global_event_history_template.copy()
+            new_event["event_type"] = "BVR_KILL"
+            new_event["datetime"] = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S") #same format as the sqlite3 datetime format
+            new_event["killer_id"] = next((p for p in self.online_players if p["playername"] == killer_name), None)["steam_id"]
+            new_event["killer_name"] = killer_name
+            new_event["killer_aircraft"] = ""
+            new_event["victim_id"] = next((p for p in self.online_players if p["playername"] == victim), None)["steam_id"]
+            new_event["victim_name"] = victim
+            new_event["victim_aircraft"] = aircraft
+            new_event["weapon"] = weapon
+            new_event["elo_delta"] = delta
+            self.global_event_history.append(new_event)
+
+            return True
+            
+        except Exception as e:
+            print(f'[ERROR] Error processing kill event: {e}')
+            return False
+
+    def _print_online_players(self):
+        """Helper to print current online players"""
+        print(f"Online Players: ")
+        for player in self.online_players:
+            print(f"  {player['playername']} ({player['steam_id']}) - DB_ELO: {player['in_game_elo']} - Ingame_ELO: {player['in_game_elo']+sum(player['ingame_elo_history'])}")
+
 server = EzServer()
 S2MS = 1000
 MIN2MS = 60 * S2MS
 H2MS = 60 * MIN2MS
-H2S = 60 * 60
+H2S = 60 * 60 
 
-SERVER_NAME = "PvP Server-60min mapcycle"
+TEST_TIME = 1
+
+
+SERVER_NAME = "24/7Ranked Server-Season 1"
 SERVER_PASSWORD = "2025"
 PUBLIC = True
 UNIT_ICON = False
@@ -306,17 +495,18 @@ RAND_MODE = False
 
 
 FSM_MAPS: dict = {
-    "state1": {"campaign_id":"2860956181", "mapname":"BVR Ethi5"},
-    "state2": {"campaign_id":"3355613749", "mapname":"MergeLarge"},
-    "state3": {"campaign_id":"2860956181", "mapname":"BVR Archipel"},
-    "state4": {"campaign_id":"2860956181", "mapname":"BVR Ocixem"},
-    "state5": {"campaign_id":"2860956181", "mapname":"BVR Crack"},
-    "state6": {"campaign_id":"2860956181", "mapname":"BVR afMtnsHills"},
-    "state7": {"campaign_id":"3583755382", "mapname":"Dragon's Valley"},
-    "state8": {"campaign_id":"3583755382", "mapname":"Fjord Coast"},
+    "state1": {"campaign_id":"2860956181", "mapname":"BVR Ethi5", "map_type":"BVR"},
+    "state2": {"campaign_id":"3355613749", "mapname":"MergeLarge", "map_type":"BFM"},
+    "state3": {"campaign_id":"2860956181", "mapname":"BVR Archipel", "map_type":"BVR"},
+    "state4": {"campaign_id":"2860956181", "mapname":"BVR Ocixem", "map_type":"BVR"},
+    "state5": {"campaign_id":"2860956181", "mapname":"BVR Crack", "map_type":"BVR"},
+    "state6": {"campaign_id":"2860956181", "mapname":"BVR afMtnsHills", "map_type":"BVR"},
+    "state7": {"campaign_id":"3583755382", "mapname":"Dragon's Valley", "map_type":"BVR"},
+    "state8": {"campaign_id":"3583755382", "mapname":"Fjord Coast", "map_type":"BVR"},
 }
 
 def init_server(state:str):
+    server.current_state = state #update current state
     server.send_message("sethost name " + SERVER_NAME)
     if PUBLIC:
         server.send_message("sethost password")
@@ -330,7 +520,7 @@ def init_server(state:str):
     server.send_message(f"sethost mission {FSM_MAPS[state]['mapname']}")
     server.send_message("checkhost")
     try:
-        server.send_and_wait("config", "HostConfig", timeout=60*3)
+        server.send_and_wait("config", "HostConfigCoroutine", timeout=60*3)
     except ResponseTimeout as e:
         print(f'[ERROR] config 命令超时: {e}')
         raise
@@ -339,10 +529,10 @@ def init_server(state:str):
         server.send_and_wait("host", "LobbyReady", timeout=60*3)
     except ResponseTimeout as e:
         print(f'[ERROR] host 命令超时: {e}')
-        
         raise
 
 def restart_server(state:str):
+    server.current_state = state #update current state
     server.send_message(f"sethost campaign {FSM_MAPS[state]['campaign_id']}")
     server.send_message(f"sethost mission {FSM_MAPS[state]['mapname']}")
     time.sleep(1) #看来是必须加这个延迟了，不然会偶发性有bug
@@ -350,8 +540,9 @@ def restart_server(state:str):
 
 
 def end_state(state:str):
+    online_players = server.online_players #save online players list to local variable
     server.send_message("skip")
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
     try:
         responses = server.send_and_wait("flightlog", "GetFlightLog", timeout=10)
         raw = responses[0]
@@ -400,18 +591,28 @@ def end_state(state:str):
     print("flightlog msg:")
     for log in msg:
         print(log)
-    # 如果 msg 是列表或字典，转换为 JSON 字符串；如果已经是字符串，直接使用
-    if isinstance(msg, (list, dict)):
-        msg_str = json.dumps(msg, ensure_ascii=False, indent=2)
+    #remove adjacent duplicates
+    def remove_adjacent_duplicates(lst):
+        result = []
+        for x in lst:
+            if not result or result[-1] != x:
+                result.append(x)
+        return result
+    #washed flightlog
+    msg_new = remove_adjacent_duplicates(msg)
+    #save flightlog
+    if isinstance(msg_new, (list, dict)):
+        msg_str = json.dumps(msg_new, ensure_ascii=False, indent=2)
     else:
-        msg_str = str(msg)
+        msg_str = str(msg_new)
     with open(LOCAL_PATH/'Flightlog_Latest.json', "w", encoding='utf-8') as f:
         f.write(msg_str)
+
     try:
         copy_folder(AUTOSAVE_PATH, LOCAL_PATH/"Replays"/f"{FSM_MAPS[state]['mapname']}_{timestamp}")
         with open(LOCAL_PATH/"Replays"/f"{FSM_MAPS[state]['mapname']}_{timestamp}/flightlog.json", "w", encoding='utf-8') as f:
             f.write(msg_str)
-        zip_folder(LOCAL_PATH/"Replays"/f"{FSM_MAPS[state]['mapname']}_{timestamp}", LOCAL_PATH/"Replays"/f"{FSM_MAPS[state]['mapname']}_{timestamp}.zip")
+        zip_folder(LOCAL_PATH/"Replays"/f"{FSM_MAPS[state]['mapname']}_{timestamp}", LOCAL_PATH/"Replays"/f"{FSM_MAPS[state]['mapname']}_{timestamp}")
         delete_folder(LOCAL_PATH/"Replays"/f"{FSM_MAPS[state]['mapname']}_{timestamp}")
         delete_folder(AUTOSAVE_PATH)
 
@@ -421,8 +622,27 @@ def end_state(state:str):
         create_folder(LOCAL_PATH/"Replays"/f"{FSM_MAPS[state]['mapname']}_{timestamp}")
         with open(LOCAL_PATH/"Replays"/f"{FSM_MAPS[state]['mapname']}_{timestamp}/flightlog.json", "w", encoding='utf-8') as f:
             f.write(msg_str)
-        zip_folder(LOCAL_PATH/"Replays"/f"{FSM_MAPS[state]['mapname']}_{timestamp}", LOCAL_PATH/"Replays"/f"{FSM_MAPS[state]['mapname']}_{timestamp}.zip")
+        zip_folder(LOCAL_PATH/"Replays"/f"{FSM_MAPS[state]['mapname']}_{timestamp}", LOCAL_PATH/"Replays"/f"{FSM_MAPS[state]['mapname']}_{timestamp}") #.zip is added in the function
         delete_folder(LOCAL_PATH/"Replays"/f"{FSM_MAPS[state]['mapname']}_{timestamp}")
+
+    finally:
+        #replay info
+        with open(LOCAL_PATH/"Replays"/f"{FSM_MAPS[state]['mapname']}_{timestamp}.zip","rb",) as f:
+            meta_blob = f.read()
+        replay_info = server.replay_info_template.copy()
+        replay_info["file_name"] = f"{FSM_MAPS[state]['mapname']}_{timestamp}.zip"
+        replay_info["map_name"] = FSM_MAPS[state]['mapname']
+        replay_info["played_at"] = timestamp
+        replay_info["meta_blob"] = meta_blob
+        replay_info["map_type"] = FSM_MAPS[state]['map_type']
+        #save global event history
+        if server.global_event_history:
+            db_flightlog.save_global_event_history(server.global_event_history, replay_info, msg_new)
+            db_flightlog.update_player_elo(online_players, FSM_MAPS[state]['map_type'])
+            
+        server.global_event_history.clear()
+        server.online_players.clear()
+            
 
 def zip_folder(folder: Path, out_zip: Path):
     shutil.make_archive(str(out_zip), "zip", str(folder.parent), folder.name)
@@ -480,7 +700,7 @@ def _state1():
 
 def _state2():
     global count_num
-    duration = 1 * H2S
+    duration = 1 * 20 * 60 #20 minutes
     time_prepare = 60 #time for read briefing
     print("State 2\n")
     print(f"count_num: {count_num}\n")
