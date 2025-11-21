@@ -415,7 +415,7 @@ class EzServer:
         """Handle kill event and update ELO"""
         try:
             delta = EloSystem.calculate_elo_change_from_log(
-                killer_name, aircraft, victim, weapon
+                killer_name, aircraft, victim, weapon, FSM_MAPS[self.current_state]['map_type']
             )
             print(f'[Event] Kill Event: {killer_name} killed {aircraft} ({victim}) with {weapon}')
             # Update player ELO
@@ -532,6 +532,7 @@ def init_server(state:str):
         raise
 
 def restart_server(state:str):
+    server.current_state = state #update current state
     server.send_message(f"sethost campaign {FSM_MAPS[state]['campaign_id']}")
     server.send_message(f"sethost mission {FSM_MAPS[state]['mapname']}")
     time.sleep(1) #看来是必须加这个延迟了，不然会偶发性有bug

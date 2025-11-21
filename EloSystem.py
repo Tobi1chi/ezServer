@@ -31,12 +31,17 @@ class EloSystem:
     def set_elo(self, playername: str, elo: int) -> None:
         self.elo_dict[playername] = elo
     
-    def calculate_elo_change_from_log(self,kill_playername, kill_aircraft, kill_faction, kill_weapon) -> int:
-        mult_weapon = WEAPON_ELO_MULTIPLIER.get(kill_weapon, 1.0)
-        mult_aircraft = AIRCRAFT_ELO_MULTIPLIER.get(kill_aircraft, 1.0)
-        total_mult = mult_weapon * mult_aircraft
-        if total_mult > ELO_CILING:
-            total_mult = ELO_CILING
+    def calculate_elo_change_from_log(self,kill_playername, kill_aircraft, kill_faction, kill_weapon,map_type:str) -> int:
+        if map_type == "BVR":
+            mult_weapon = WEAPON_ELO_MULTIPLIER.get(kill_weapon, 1.0)
+            mult_aircraft = AIRCRAFT_ELO_MULTIPLIER.get(kill_aircraft, 1.0)
+            total_mult = mult_weapon * mult_aircraft
+            if total_mult > ELO_CILING:
+                total_mult = ELO_CILING
+        elif map_type == "BFM":
+            total_mult = 1.0 #get 1 or loss 1
+        elif map_type == "PVE":
+            total_mult = 0 #no elo change, still need more implementations here
         return total_mult
 
 EloSystem = EloSystem()
