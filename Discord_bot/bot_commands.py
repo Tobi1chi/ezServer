@@ -146,8 +146,7 @@ class PlayerStatsService:
                     peh.*,
                     e.event_type,
                     e.weapon,
-                    r.map_name,
-                    r.map_type
+                    r.map_name
                 FROM player_elo_history peh
                 LEFT JOIN events e ON peh.event_id = e.id
                 LEFT JOIN replays r ON peh.replay_id = r.id
