@@ -7,6 +7,7 @@ import json
 import datetime
 import re 
 from EloSystem import WEAPON_ELO_MULTIPLIER, AIRCRAFT_ELO_MULTIPLIER
+from ezServer import DEBUG
 FLIGHTLOG_DB_PATH = Path(__file__).parent /"DataBase"/"flightlogDB.sqlite"
 TEST_PATH = Path(__file__).parent /"MergeLarge_20251114_120521"/"flightlog.json"
 DB_DIR = Path(__file__).parent /"DataBase"
@@ -374,12 +375,13 @@ class flightlogDB:
         """
         conn = self.get_conn()
         cur = conn.cursor()
-        elo_type = ELO_TYPE.get(map_type, "Unknown")
+        elo_type = ELO_TYPE.get(map_type)
         for player in online_players:
             steam_id = player.get("steam_id")
-            player_name = player.get("name")
+            player_name = player.get("playername")
             player_elo = player.get("in_game_elo")
             player_elo_history = sum(player.get("ingame_elo_history"))
+            if DEBUG: print(f"[DEBUG] Player {player_name} (ID: {steam_id}) Elo: {player_elo} + {player_elo_history}")
             cur.execute(
                 f"""
                 SELECT {elo_type} FROM players WHERE steam_id = ?
@@ -390,6 +392,8 @@ class flightlogDB:
             if db_elo is not player_elo:
                 print(f"[ERROR] Player {player_name} (ID: {steam_id}) Elo is not correct: {player_elo} != {cur.fetchone()}")
                 print("[Database] Database contains wrong Elo value")
+                cur.rollback()
+                conn.close()
                 raise ValueError(f"Player {player_name} (ID: {steam_id}) Elo is not correct: {player_elo} != {cur.fetchone()}")
             else:
                 cur.execute(

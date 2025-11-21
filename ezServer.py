@@ -62,7 +62,7 @@ class EzServer:
         
         # Online players
         self.online_players = []
-
+        self.current_state = ""
         # Response filters
         self._quiet_unmatched_srcs = {}
         self._auto_process_srcs = {"OnChatMsg"}
@@ -359,8 +359,9 @@ class EzServer:
 
     def _handle_player_connected(self, playername: str, steam_id: str, steam_name: str) -> bool:
         """Handle player connection event"""
-        map_type = "BVR"
-
+        current_state = self.current_state
+        map_type = FSM_MAPS[current_state]['map_type']
+        if DEBUG :print(f"[DEBUG] Current state: {map_type}")
         # 先查有没有这个 steam_id
         existing = next((p for p in self.online_players if p["steam_id"] == steam_id), None)
 
@@ -388,6 +389,8 @@ class EzServer:
         self.online_players.append(player_dict)
 
         print(f'[Event] Connected: {playername}')
+        print(player_db)
+        if DEBUG :print(f"[DEBUG] Online Players: {self.online_players}")
         self._print_online_players()
         return True
 
@@ -467,9 +470,9 @@ class EzServer:
 
     def _print_online_players(self):
         """Helper to print current online players"""
-        print(f"[INFO] Online Players: ")
+        print(f"Online Players: ")
         for player in self.online_players:
-            print(f"  {player['playername']} ({player['steam_id']}) - ELO: {player['in_game_elo']}")
+            print(f"  {player['playername']} ({player['steam_id']}) - DB_ELO: {player['in_game_elo']} - Ingame_ELO: {player['in_game_elo']+sum(player['ingame_elo_history'])}")
 
 server = EzServer()
 S2MS = 1000
@@ -503,6 +506,7 @@ FSM_MAPS: dict = {
 }
 
 def init_server(state:str):
+    server.current_state = state #update current state
     server.send_message("sethost name " + SERVER_NAME)
     if PUBLIC:
         server.send_message("sethost password")
