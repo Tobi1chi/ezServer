@@ -10,6 +10,9 @@ import discord
 from discord.ext import commands
 import asyncio
 
+# 导入配置
+from config import DISCORD_GUILD_ID
+
 # 添加父目录到路径
 sys.path.append(str(Path(__file__).parent.parent))
 
@@ -66,8 +69,15 @@ async def on_ready():
     # 同步斜杠命令
     try:
         print("🔄 正在同步斜杠命令...")
-        synced = await bot.tree.sync()
-        print(f"✅ 成功同步 {len(synced)} 个斜杠命令")
+        # 如果指定了GUILD_ID，则只同步到该服务器（立即生效）
+        # 否则全局同步（可能需要1小时）
+        if DISCORD_GUILD_ID:
+            guild = discord.Object(id=int(DISCORD_GUILD_ID))
+            synced = await bot.tree.sync(guild=guild)
+            print(f"✅ 成功同步 {len(synced)} 个斜杠命令到服务器 {DISCORD_GUILD_ID}（立即生效）")
+        else:
+            synced = await bot.tree.sync()
+            print(f"✅ 成功同步 {len(synced)} 个斜杠命令（全局同步，可能需要最多1小时生效）")
         
         # 显示已同步的命令
         for cmd in synced:
@@ -102,8 +112,8 @@ async def on_guild_join(guild: discord.Guild):
                     value=(
                         "• `/stats NAME:玩家名` - 通过名称查询玩家\n"
                         "• `/stats ID:Steam_ID` - 通过Steam ID查询玩家\n"
-                        "• `/chatwithAI 消息` - 与AI助手对话\n"
-                        "• `/endAIchat` - 结束AI对话"
+                        "• `/chatwithai 消息` - 与AI助手对话\n"
+                        "• `/endaichat` - 结束AI对话"
                     ),
                     inline=False
                 )
@@ -177,8 +187,8 @@ async def help_command(ctx: commands.Context):
     embed.add_field(
         name="🤖 AI聊天",
         value=(
-            "`/chatwithAI 消息` - 与AI助手对话\n"
-            "`/endAIchat` - 结束当前AI对话\n"
+            "`/chatwithai 消息` - 与AI助手对话\n"
+            "`/endaichat` - 结束当前AI对话\n"
             "注意：同时只能有一个用户与AI对话，3分钟无活动自动结束"
         ),
         inline=False

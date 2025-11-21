@@ -19,13 +19,8 @@ from discord.ext import commands, tasks
 sys.path.append(str(Path(__file__).parent.parent))
 from DB import flightlogDB, FLIGHTLOG_DB_PATH, ELO_TYPE
 
-# Ollama 配置
-OLLAMA_CONFIG = {
-    "url": "http://127.0.0.1:11434",
-    "model": "qwen2.5:7b",  # 默认模型
-    "timeout": 300,  # 5分钟超时
-    "chat_timeout": 180,  # 3分钟无活动自动结束对话
-}
+# 导入配置
+from Discord_bot.config import OLLAMA_CONFIG, ALLOWED_CHANNELS, MAX_DISPLAY_RECORDS
 
 
 class PlayerStatsService:
@@ -262,6 +257,18 @@ class BotCommands(commands.Cog):
         # 启动超时检查任务
         self.check_chat_timeout.start()
     
+    def check_channel_permission(self, channel_id: int) -> bool:
+        """
+        检查频道是否允许使用命令
+        :param channel_id: 频道ID
+        :return: True表示允许，False表示不允许
+        """
+        # 如果没有配置频道白名单，则所有频道都允许
+        if not ALLOWED_CHANNELS:
+            return True
+        # 检查当前频道是否在白名单中
+        return channel_id in ALLOWED_CHANNELS
+    
     @app_commands.command(name="stats", description="查询玩家统计信息")
     @app_commands.describe(
         query="查询参数，格式: NAME:玩家名 或 ID:Steam_ID"
@@ -273,6 +280,14 @@ class BotCommands(commands.Cog):
         - /stats NAME:玩家名称
         - /stats ID:Steam_ID
         """
+        # 检查频道权限
+        if not self.check_channel_permission(interaction.channel_id):
+            await interaction.response.send_message(
+                "❌ 此命令不能在当前频道使用！",
+                ephemeral=True
+            )
+            return
+        
         await interaction.response.defer(thinking=True)
         
         try:
@@ -327,7 +342,7 @@ class BotCommands(commands.Cog):
             )
             print(f"[ERROR] Stats command error: {e}")
     
-    @app_commands.command(name="chatwithAI", description="与AI聊天")
+    @app_commands.command(name="chatwithai", description="与AI聊天")
     @app_commands.describe(
         message="要发送给AI的消息"
     )
@@ -336,6 +351,14 @@ class BotCommands(commands.Cog):
         与AI聊天功能
         一次只能有一个用户对话，3分钟无活动自动结束
         """
+        # 检查频道权限
+        if not self.check_channel_permission(interaction.channel_id):
+            await interaction.response.send_message(
+                "❌ 此命令不能在当前频道使用！",
+                ephemeral=True
+            )
+            return
+        
         await interaction.response.defer(thinking=True)
         
         try:
@@ -349,7 +372,7 @@ class BotCommands(commands.Cog):
                     current_user = await self.bot.fetch_user(self.current_chat_user)
                     await interaction.followup.send(
                         f"❌ AI当前正在与 {current_user.display_name} 对话中，请稍后再试！\n"
-                        f"💡 提示：使用 `/endAIchat` 可以结束对话",
+                        f"💡 提示：使用 `/endaichat` 可以结束对话",
                         ephemeral=True
                     )
                     return
@@ -440,11 +463,19 @@ class BotCommands(commands.Cog):
             )
             print(f"[ERROR] Chat with AI error: {e}")
     
-    @app_commands.command(name="endAIchat", description="结束当前AI对话")
+    @app_commands.command(name="endaichat", description="结束当前AI对话")
     async def end_ai_chat(self, interaction: discord.Interaction):
         """
         手动结束AI对话，清理上下文
         """
+        # 检查频道权限
+        if not self.check_channel_permission(interaction.channel_id):
+            await interaction.response.send_message(
+                "❌ 此命令不能在当前频道使用！",
+                ephemeral=True
+            )
+            return
+        
         await interaction.response.defer(thinking=True)
         
         try:
