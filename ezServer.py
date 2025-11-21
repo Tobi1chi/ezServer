@@ -483,7 +483,7 @@ H2S = 60 * 60
 TEST_TIME = 1
 
 
-SERVER_NAME = "24/7Ranked Server_Elo Test"
+SERVER_NAME = "24/7Ranked Server-Season 1"
 SERVER_PASSWORD = "2025"
 PUBLIC = True
 UNIT_ICON = False
@@ -639,8 +639,9 @@ def end_state(state:str):
         if server.global_event_history:
             db_flightlog.save_global_event_history(server.global_event_history, replay_info, msg_new)
             db_flightlog.update_player_elo(online_players, FSM_MAPS[state]['map_type'])
-            server.global_event_history.clear()
-            server.online_players.clear()
+            
+        server.global_event_history.clear()
+        server.online_players.clear()
             
 
 def zip_folder(folder: Path, out_zip: Path):
