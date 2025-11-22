@@ -864,9 +864,6 @@ def main():
         print("无法连接到服务器，程序退出")
         return
     _test()
-    while DEBUG:
-        time.sleep(1)
-    
     print("--------------------------------")
     print("已加载的FSM状态:")
     for k, v in FSM_MAPS.items():

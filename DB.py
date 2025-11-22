@@ -8,7 +8,7 @@ import datetime
 import re 
 from EloSystem import WEAPON_ELO_MULTIPLIER, AIRCRAFT_ELO_MULTIPLIER
 
-DEBUG = False
+DEBUG = True
 FLIGHTLOG_DB_PATH = Path(__file__).parent /"DataBase"/"flightlogDB.sqlite"
 TEST_PATH = Path(__file__).parent /"MergeLarge_20251114_120521"/"flightlog.json"
 DB_DIR = Path(__file__).parent /"DataBase"
@@ -228,13 +228,33 @@ class flightlogDB:
         :return: True/False 表示是否成功
         """
         try:
+            if DEBUG: print(f"[DEBUG] Saving global event history: {global_event} \n\treplay_info: {replay_info} \n\tflightlog: {flightlog}")
             conn = self.get_conn()
             cur = conn.cursor()
-            valid_map_types = ["BVR", "BFM", "PVE"]
-            elo_type = ELO_TYPE.get(replay_info.get("map_type"), "Unknown") #default to BVR
+            elo_type = ELO_TYPE.get(replay_info.get("map_type"), "Unknown")
             if elo_type == "Unknown":
                 print(f"[ERROR] Unknown map type: {replay_info.get('map_type')}")
                 raise ValueError(f"Unknown map type: {replay_info.get('map_type')}")
+            
+            # ====== 本局 Elo 缓存：key = player_id, value = 当前这局内的 Elo ======
+            current_elo_cache: dict = {}
+            
+            # 工具函数：在"这一局"里获取玩家的 elo_before
+            def get_elo_before_in_match(player: dict) -> float:
+                """
+                获取玩家在本局内的当前 Elo
+                :param player: 玩家字典，至少包含 'id' 和对应的 elo_type 字段
+                :return: 本局内的当前 Elo 值
+                """
+                pid = player["id"]
+                if pid in current_elo_cache:
+                    # 这一局里已经有过记录，直接用当前缓存
+                    return current_elo_cache[pid]
+                # 第一次在本局出现，从 players 表里的基底分开始
+                base_elo = player[elo_type]
+                current_elo_cache[pid] = base_elo
+                return base_elo
+            
             # 先存储replay信息
             cur.execute(
                 """
@@ -270,6 +290,10 @@ class flightlogDB:
                     )
                 )
                 event_id = cur.lastrowid
+                
+                # 初始化玩家对象
+                killer_player = None
+                victim_player = None
                 
                 # 处理 player_events - killer
                 if event.get("killer_id"):
@@ -312,43 +336,44 @@ class flightlogDB:
                     (event_id, json.dumps(event))
                 )
                 
+                # ====== ELO 历史：这一局内"同一个玩家"的上一条 elo_after ======
+                elo_delta = event.get("elo_delta", 0)
+                
                 # 处理 player_elo_history - killer
                 if event.get("killer_id") and killer_player:
-                    elo_delta = event.get("elo_delta", 0)
+                    pid = killer_player["id"]
+                    elo_before = get_elo_before_in_match(killer_player)
+                    elo_after = elo_before + elo_delta
+                    
                     cur.execute(
                         """
                         INSERT INTO player_elo_history 
                         (player_id, event_id, replay_id, at_time, elo_before, elo_after) 
                         VALUES (?, ?, ?, ?, ?, ?)
                         """,
-                        (
-                            killer_player["id"],
-                            event_id,
-                            replay_id,
-                            event.get("datetime", ""),
-                            killer_player[elo_type],  # 根据事件类型选择相应的ELO
-                            killer_player[elo_type] + elo_delta
-                        )
+                        (pid, event_id, replay_id, event.get("datetime", ""), elo_before, elo_after)
                     )
+                    
+                    # 更新本局 Elo：下次这个玩家出现时，用这次的 elo_after
+                    current_elo_cache[pid] = elo_after
                 
                 # 处理 player_elo_history - victim
                 if event.get("victim_id") and victim_player:
-                    elo_delta = event.get("elo_delta", 0)
+                    pid = victim_player["id"]
+                    elo_before = get_elo_before_in_match(victim_player)
+                    elo_after = elo_before - elo_delta
+                    
                     cur.execute(
                         """
                         INSERT INTO player_elo_history 
                         (player_id, event_id, replay_id, at_time, elo_before, elo_after) 
                         VALUES (?, ?, ?, ?, ?, ?)
                         """,
-                        (
-                            victim_player["id"],
-                            event_id,
-                            replay_id,
-                            event.get("datetime", ""),
-                            victim_player[elo_type],
-                            victim_player[elo_type] - elo_delta
-                        )
+                        (pid, event_id, replay_id, event.get("datetime", ""), elo_before, elo_after)
                     )
+                    
+                    # 更新本局 Elo
+                    current_elo_cache[pid] = elo_after
             
             conn.commit()
             conn.close()
@@ -390,12 +415,12 @@ class flightlogDB:
                 (steam_id,)
             )
             db_elo = cur.fetchone()
-            if db_elo is not player_elo:
-                print(f"[ERROR] Player {player_name} (ID: {steam_id}) Elo is not correct: {player_elo} != {cur.fetchone()}")
+            if db_elo[0] != player_elo: #god damn type diff......
+                print(f"[ERROR] Player {player_name} (ID: {steam_id}) Elo is not correct: {player_elo} != {db_elo[0]}")
                 print("[Database] Database contains wrong Elo value")
                 cur.rollback()
                 conn.close()
-                raise ValueError(f"Player {player_name} (ID: {steam_id}) Elo is not correct: {player_elo} != {cur.fetchone()}")
+                raise ValueError(f"Player {player_name} (ID: {steam_id}) Elo is not correct: {player_elo} != {db_elo[0]}")
             else:
                 cur.execute(
                     f"""

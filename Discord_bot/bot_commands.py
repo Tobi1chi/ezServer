@@ -20,7 +20,7 @@ sys.path.append(str(Path(__file__).parent.parent))
 from DB import flightlogDB, FLIGHTLOG_DB_PATH, ELO_TYPE
 
 # 导入配置
-from Discord_bot.config import OLLAMA_CONFIG, ALLOWED_CHANNELS, MAX_DISPLAY_RECORDS
+from Discord_bot.config import OLLAMA_CONFIG, ALLOWED_CHANNELS_BOTCOMMAND, ALLOWED_CHANNELS_AI, MAX_DISPLAY_RECORDS
 
 
 class PlayerStatsService:
@@ -256,17 +256,17 @@ class BotCommands(commands.Cog):
         # 启动超时检查任务
         self.check_chat_timeout.start()
     
-    def check_channel_permission(self, channel_id: int) -> bool:
+    def check_channel_permission(self, channel_id: int, allowed_channels: List[int]) -> bool:
         """
         检查频道是否允许使用命令
         :param channel_id: 频道ID
         :return: True表示允许，False表示不允许
         """
         # 如果没有配置频道白名单，则所有频道都允许
-        if not ALLOWED_CHANNELS:
+        if not allowed_channels:
             return True
         # 检查当前频道是否在白名单中
-        return channel_id in ALLOWED_CHANNELS
+        return channel_id in allowed_channels
     
     @app_commands.command(name="stats", description="查询玩家统计信息")
     @app_commands.describe(
@@ -280,7 +280,7 @@ class BotCommands(commands.Cog):
         - /stats ID:Steam_ID
         """
         # 检查频道权限
-        if not self.check_channel_permission(interaction.channel_id):
+        if not self.check_channel_permission(interaction.channel_id, ALLOWED_CHANNELS_BOTCOMMAND):
             await interaction.response.send_message(
                 "❌ 此命令不能在当前频道使用！",
                 ephemeral=True
@@ -351,7 +351,7 @@ class BotCommands(commands.Cog):
         一次只能有一个用户对话，3分钟无活动自动结束
         """
         # 检查频道权限
-        if not self.check_channel_permission(interaction.channel_id):
+        if not self.check_channel_permission(interaction.channel_id, ALLOWED_CHANNELS_AI):
             await interaction.response.send_message(
                 "❌ 此命令不能在当前频道使用！",
                 ephemeral=True
@@ -468,7 +468,7 @@ class BotCommands(commands.Cog):
         手动结束AI对话，清理上下文
         """
         # 检查频道权限
-        if not self.check_channel_permission(interaction.channel_id):
+        if not self.check_channel_permission(interaction.channel_id, ALLOWED_CHANNELS_AI):
             await interaction.response.send_message(
                 "❌ 此命令不能在当前频道使用！",
                 ephemeral=True
