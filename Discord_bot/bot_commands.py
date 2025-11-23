@@ -270,9 +270,10 @@ class BotCommands(commands.Cog):
     
     @app_commands.command(name="stats", description="查询玩家统计信息")
     @app_commands.describe(
-        query="查询参数，格式: NAME:玩家名 或 ID:Steam_ID"
+        Name="玩家名称",
+        Steam_ID="玩家Steam ID"
     )
-    async def stats(self, interaction: discord.Interaction, query: str):
+    async def stats(self, interaction: discord.Interaction, Name: Optional[str] = None, Steam_ID: Optional[str] = None):
         """
         查询玩家统计信息
         支持两种查询方式：
@@ -290,31 +291,28 @@ class BotCommands(commands.Cog):
         await interaction.response.defer(thinking=True)
         
         try:
-            # 解析查询参数
-            if ":" not in query:
-                await interaction.followup.send(
-                    "❌ 查询格式错误！请使用 `NAME:玩家名` 或 `ID:Steam_ID`",
-                    ephemeral=True
-                )
-                return
-            
-            query_type, query_value = query.split(":", 1)
-            query_type = query_type.strip().upper()
-            query_value = query_value.strip()
-            
-            # 根据查询类型获取玩家信息
+            # 查询玩家信息
             player_info = None
-            if query_type == "NAME":
-                player_info = self.stats_service.get_player_by_name(query_value)
-            elif query_type == "ID":
-                player_info = self.stats_service.get_player_by_steam_id(query_value)
+            query_value = None
+            if Name is not None:
+                if Steam_ID is not None:
+                    await interaction.followup.send(
+                        "❌ 查询格式错误！请使用 `/stats NAME:玩家名` 或 `/stats ID:Steam_ID`",
+                        ephemeral=True
+                    )
+                    return
+                else:
+                    player_info = self.stats_service.get_player_by_name(Name)
+                    query_value = Name
+            elif Steam_ID is not None:
+                player_info = self.stats_service.get_player_by_steam_id(Steam_ID)
+                query_value = Steam_ID
             else:
                 await interaction.followup.send(
-                    "❌ 未知的查询类型！请使用 `NAME` 或 `ID`",
+                    "❌ 查询格式错误！请使用 `/stats NAME:玩家名` 或 `/stats ID:Steam_ID`",
                     ephemeral=True
                 )
                 return
-            
             # 检查是否找到玩家
             if not player_info:
                 await interaction.followup.send(
