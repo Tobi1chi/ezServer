@@ -380,6 +380,7 @@ class BotCommands(commands.Cog):
                 if self.current_chat_user != user_id:
                     self.current_chat_user = user_id
                     self.current_chat_channel = channel_id
+
                     self.chat_messages = [
                         {
                             "role": "system",
@@ -388,7 +389,7 @@ class BotCommands(commands.Cog):
                                 "回答游戏相关问题。请用简洁清晰的中文回答。"
                             )
                         }
-                    ]
+                    ] #preset system prompt
                     print(f"[AI Chat] 开始与用户 {user_name} ({user_id}) 的新对话")
                 
                 # 更新活动时间
@@ -398,34 +399,41 @@ class BotCommands(commands.Cog):
                 self.chat_messages.append({
                     "role": "user",
                     "content": message
-                })
+                }) #add user message into context
                 
-                # 调用AI获取响应
+                # call ollama api to get ai response
                 try:
                     ai_response = await self._call_ollama_api(self.chat_messages)
                     
                     if ai_response:
-                        # 添加AI响应到历史
+                        # add ai response into context
                         self.chat_messages.append({
                             "role": "assistant",
                             "content": ai_response
                         })
                         
-                        # 创建响应Embed
+                        # create response embed
                         embed = discord.Embed(
                             title="🤖 AI助手",
                             color=discord.Color.green()
                         )
                         embed.add_field(
                             name="💬 你的消息",
-                            value=message[:1024],  # Discord字段限制
+                            value=message[:1024],  # discord field limit
                             inline=False
                         )
-                        embed.add_field(
-                            name="🔮 AI回复",
-                            value=ai_response[:1024],  # Discord字段限制
-                            inline=False
-                        )
+                        if len(ai_response) > 1024:
+                            embed.add_field(
+                                name="🔮 AI回复",
+                                value=ai_response[:1024],  # discord field limit
+                                inline=False
+                            )
+                            embed.add_field(
+                                name="🔮 AI回复",
+                                value=ai_response[1024:2048],  # discord field limit
+                                inline=False
+                            )
+                        
                         embed.set_footer(text=f"对话轮数: {(len(self.chat_messages) - 1) // 2} | 3分钟无活动将自动结束")
                         
                         await interaction.followup.send(embed=embed)
