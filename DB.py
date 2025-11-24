@@ -418,7 +418,7 @@ class flightlogDB:
             if db_elo[0] != player_elo: #god damn type diff......
                 print(f"[ERROR] Player {player_name} (ID: {steam_id}) Elo is not correct: {player_elo} != {db_elo[0]}")
                 print("[Database] Database contains wrong Elo value")
-                cur.rollback()
+                conn.rollback()
                 conn.close()
                 raise ValueError(f"Player {player_name} (ID: {steam_id}) Elo is not correct: {player_elo} != {db_elo[0]}")
             else:
@@ -426,7 +426,7 @@ class flightlogDB:
                     f"""
                     UPDATE players SET {elo_type} = ? WHERE steam_id = ?
                     """,
-                    (player_elo_history + db_elo, steam_id)
+                    (player_elo_history + db_elo[0], steam_id)
                 )
                 conn.commit()
                 print(f"[Database] Player {player_name} (ID: {steam_id}) Elo updated to {player_elo_history + db_elo}")
