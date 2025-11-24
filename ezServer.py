@@ -489,7 +489,7 @@ PUBLIC = True
 UNIT_ICON = False
 BASE_PATH = Path(r"C:\Users\28262\AppData\Roaming\Boundless Dynamics, LLC\VTOLVR\SaveData\Replays")
 LOCAL_PATH = Path(__file__).parent
-AUTOSAVE_PATH = BASE_PATH / "Autosave9"
+AUTOSAVE_PATH = BASE_PATH / "Autosave 9"
 DEBUG = False
 RAND_MODE = False
 

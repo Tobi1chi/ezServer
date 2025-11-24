@@ -276,15 +276,15 @@ class BotCommands(commands.Cog):
     
     @app_commands.command(name="stats", description="查询玩家统计信息")
     @app_commands.describe(
-        Name="玩家名称",
-        Steam_ID="玩家Steam ID"
+        name="玩家名称",
+        steam_id="玩家Steam ID"
     )
-    async def stats(self, interaction: discord.Interaction, Name: Optional[str] = None, Steam_ID: Optional[str] = None):
+    async def stats(self, interaction: discord.Interaction, name: Optional[str] = None, steam_id: Optional[str] = None):
         """
         查询玩家统计信息
         支持两种查询方式：
-        - /stats NAME:玩家名称
-        - /stats ID:Steam_ID
+        - /stats name:玩家名称
+        - /stats steam_id:玩家SteamID
         """
         # 检查频道权限
         if not self.check_channel_permission(interaction.channel_id, ALLOWED_CHANNELS_BOTCOMMAND):
@@ -300,22 +300,22 @@ class BotCommands(commands.Cog):
             # 查询玩家信息
             player_info = None
             query_value = None
-            if Name is not None:
-                if Steam_ID is not None:
+            if name is not None:
+                if steam_id is not None:
                     await interaction.followup.send(
-                        "❌ 查询格式错误！请使用 `/stats NAME:玩家名` 或 `/stats ID:Steam_ID`",
+                        "❌ 查询格式错误！请使用 `/stats name:玩家名` 或 `/stats steam_id:玩家SteamID`",
                         ephemeral=True
                     )
                     return
                 else:
-                    player_info = self.stats_service.get_player_by_name(Name)
-                    query_value = Name
-            elif Steam_ID is not None:
-                player_info = self.stats_service.get_player_by_steam_id(Steam_ID)
-                query_value = Steam_ID
+                    player_info = self.stats_service.get_player_by_name(name)
+                    query_value = name
+            elif steam_id is not None:
+                player_info = self.stats_service.get_player_by_steam_id(steam_id)
+                query_value = steam_id
             else:
                 await interaction.followup.send(
-                    "❌ 查询格式错误！请使用 `/stats NAME:玩家名` 或 `/stats ID:Steam_ID`",
+                    "❌ 查询格式错误！请使用 `/stats name:玩家名` 或 `/stats steam_id:玩家SteamID`",
                     ephemeral=True
                 )
                 return

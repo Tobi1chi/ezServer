@@ -34,7 +34,7 @@ test/
 Replays/
 temp/
 DB/
-#DataBase/
+DataBase/
 Discord_bot/temp/
 Discord_bot/*.md
 
