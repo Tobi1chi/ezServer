@@ -20,7 +20,10 @@ sys.path.append(str(Path(__file__).parent.parent))
 from DB import flightlogDB, FLIGHTLOG_DB_PATH, ELO_TYPE
 
 # 导入配置
-from Discord_bot.config import OLLAMA_CONFIG, ALLOWED_CHANNELS, MAX_DISPLAY_RECORDS
+from Discord_bot.config import OLLAMA_CONFIG, ALLOWED_CHANNELS_BOTCOMMAND, ALLOWED_CHANNELS_AI, MAX_DISPLAY_RECORDS
+
+# 导入RAG系统
+from Discord_bot.rag_system import RAGSystem
 
 
 class PlayerStatsService:
@@ -246,6 +249,9 @@ class BotCommands(commands.Cog):
         self.bot = bot
         self.stats_service = PlayerStatsService()
         
+        # RAG系统初始化
+        self.rag_system = RAGSystem()
+        
         # AI聊天相关状态管理
         self.current_chat_user: Optional[int] = None  # 当前对话的用户ID
         self.current_chat_channel: Optional[int] = None  # 当前对话的频道ID
@@ -256,31 +262,32 @@ class BotCommands(commands.Cog):
         # 启动超时检查任务
         self.check_chat_timeout.start()
     
-    def check_channel_permission(self, channel_id: int) -> bool:
+    def check_channel_permission(self, channel_id: int, allowed_channels: List[int]) -> bool:
         """
         检查频道是否允许使用命令
         :param channel_id: 频道ID
         :return: True表示允许，False表示不允许
         """
         # 如果没有配置频道白名单，则所有频道都允许
-        if not ALLOWED_CHANNELS:
+        if not allowed_channels:
             return True
         # 检查当前频道是否在白名单中
-        return channel_id in ALLOWED_CHANNELS
+        return channel_id in allowed_channels
     
     @app_commands.command(name="stats", description="查询玩家统计信息")
     @app_commands.describe(
-        query="查询参数，格式: NAME:玩家名 或 ID:Steam_ID"
+        name="玩家名称",
+        steam_id="玩家Steam ID"
     )
-    async def stats(self, interaction: discord.Interaction, query: str):
+    async def stats(self, interaction: discord.Interaction, name: Optional[str] = None, steam_id: Optional[str] = None):
         """
         查询玩家统计信息
         支持两种查询方式：
-        - /stats NAME:玩家名称
-        - /stats ID:Steam_ID
+        - /stats name:玩家名称
+        - /stats steam_id:玩家SteamID
         """
         # 检查频道权限
-        if not self.check_channel_permission(interaction.channel_id):
+        if not self.check_channel_permission(interaction.channel_id, ALLOWED_CHANNELS_BOTCOMMAND):
             await interaction.response.send_message(
                 "❌ 此命令不能在当前频道使用！",
                 ephemeral=True
@@ -290,31 +297,28 @@ class BotCommands(commands.Cog):
         await interaction.response.defer(thinking=True)
         
         try:
-            # 解析查询参数
-            if ":" not in query:
-                await interaction.followup.send(
-                    "❌ 查询格式错误！请使用 `NAME:玩家名` 或 `ID:Steam_ID`",
-                    ephemeral=True
-                )
-                return
-            
-            query_type, query_value = query.split(":", 1)
-            query_type = query_type.strip().upper()
-            query_value = query_value.strip()
-            
-            # 根据查询类型获取玩家信息
+            # 查询玩家信息
             player_info = None
-            if query_type == "NAME":
-                player_info = self.stats_service.get_player_by_name(query_value)
-            elif query_type == "ID":
-                player_info = self.stats_service.get_player_by_steam_id(query_value)
+            query_value = None
+            if name is not None:
+                if steam_id is not None:
+                    await interaction.followup.send(
+                        "❌ 查询格式错误！请使用 `/stats name:玩家名` 或 `/stats steam_id:玩家SteamID`",
+                        ephemeral=True
+                    )
+                    return
+                else:
+                    player_info = self.stats_service.get_player_by_name(name)
+                    query_value = name
+            elif steam_id is not None:
+                player_info = self.stats_service.get_player_by_steam_id(steam_id)
+                query_value = steam_id
             else:
                 await interaction.followup.send(
-                    "❌ 未知的查询类型！请使用 `NAME` 或 `ID`",
+                    "❌ 查询格式错误！请使用 `/stats name:玩家名` 或 `/stats steam_id:玩家SteamID`",
                     ephemeral=True
                 )
                 return
-            
             # 检查是否找到玩家
             if not player_info:
                 await interaction.followup.send(
@@ -341,6 +345,184 @@ class BotCommands(commands.Cog):
             )
             print(f"[ERROR] Stats command error: {e}")
     
+    @app_commands.command(name="ai", description="使用AI智能查询数据库")
+    @app_commands.describe(
+        query="你的自然语言查询，例如：查一下最近的BVR表现、谁在排行榜第一"
+    )
+    async def ai_query(self, interaction: discord.Interaction, query: str):
+        """
+        RAG智能查询命令
+        用户输入自然语言 -> AI自动生成SQL -> 查询数据库 -> AI总结结果
+        """
+        # 检查频道权限
+        if not self.check_channel_permission(interaction.channel_id, ALLOWED_CHANNELS_AI):
+            await interaction.response.send_message(
+                "❌ 此命令不能在当前频道使用！",
+                ephemeral=True
+            )
+            return
+        
+        await interaction.response.defer(thinking=True)
+        
+        try:
+            user_name = interaction.user.display_name
+            print(f"[RAG Query] 用户 {user_name} 查询: {query}")
+            
+            # 1. 使用RAG系统处理查询
+            rag_result = self.rag_system.process_query(query)
+            
+            if not rag_result["success"]:
+                await interaction.followup.send(
+                    "❌ 没有找到相关数据，请尝试其他查询方式",
+                    ephemeral=True
+                )
+                return
+            
+            # 2. 调用Ollama API生成自然语言总结
+            try:
+                # 构建AI提示词
+                system_prompt = (
+                    "你是ezServer游戏服务器的数据分析AI助手。"
+                    "你会收到数据库查询结果，请根据这些数据生成简洁清晰的中文总结或战报。"
+                    "要求：\n"
+                    "1. 突出关键数据和趋势\n"
+                    "2. 使用适当的emoji增强可读性\n"
+                    "3. 保持专业和友好的语气\n"
+                    "4. 如果是战报，要有叙事感\n"
+                )
+                
+                messages = [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": rag_result["llm_context"]}
+                ]
+                
+                ai_summary = await self._call_ollama_api(messages)
+                
+                if not ai_summary:
+                    # 如果AI总结失败，返回原始数据摘要
+                    ai_summary = self._format_data_fallback(rag_result["data"], rag_result["intent"])
+                
+            except Exception as e:
+                print(f"[ERROR] AI总结失败: {e}")
+                ai_summary = self._format_data_fallback(rag_result["data"], rag_result["intent"])
+            
+            # 3. 构建Discord响应
+            embed = discord.Embed(
+                title="🤖 AI 智能查询结果",
+                color=discord.Color.blue()
+            )
+            
+            # 显示用户查询
+            embed.add_field(
+                name="💬 你的查询",
+                value=f"`{query}`",
+                inline=False
+            )
+            
+            # 显示识别的意图
+            intent_name = rag_result["intent"].get("intent", "未知")
+            embed.add_field(
+                name="🎯 识别意图",
+                value=f"`{intent_name}`",
+                inline=True
+            )
+            
+            # 显示数据条数
+            embed.add_field(
+                name="📊 数据条数",
+                value=f"`{len(rag_result['data'])}` 条",
+                inline=True
+            )
+            
+            # 显示AI总结（分段处理，避免超过Discord字段限制）
+            summary_chunks = self._split_text(ai_summary, 1024)
+            for i, chunk in enumerate(summary_chunks[:3], 1):  # 最多3段
+                field_name = "🔮 AI 分析" if i == 1 else f"🔮 AI 分析 (续{i-1})"
+                embed.add_field(
+                    name=field_name,
+                    value=chunk,
+                    inline=False
+                )
+            
+            # 显示生成的SQL（可选，调试用）
+            if len(rag_result["sql"]) < 500:
+                embed.add_field(
+                    name="🔧 生成的SQL",
+                    value=f"```sql\n{rag_result['sql'][:500]}\n```",
+                    inline=False
+                )
+            
+            embed.set_footer(text=f"查询用户: {user_name} | RAG系统 v1.0")
+            
+            await interaction.followup.send(embed=embed)
+            print(f"[RAG Query] 查询完成，返回 {len(rag_result['data'])} 条数据")
+            
+        except requests.exceptions.ConnectionError:
+            await interaction.followup.send(
+                "❌ 无法连接到AI服务，请确保Ollama服务正在运行\n"
+                f"💡 Ollama地址: {OLLAMA_CONFIG['url']}",
+                ephemeral=True
+            )
+            print(f"[ERROR] 无法连接到Ollama服务: {OLLAMA_CONFIG['url']}")
+            
+        except Exception as e:
+            await interaction.followup.send(
+                f"❌ 查询处理出错：{str(e)}",
+                ephemeral=True
+            )
+            print(f"[ERROR] AI query error: {e}")
+            import traceback
+            traceback.print_exc()
+    
+    def _split_text(self, text: str, max_length: int) -> List[str]:
+        """
+        将长文本分割成多个段落
+        :param text: 原始文本
+        :param max_length: 每段最大长度
+        :return: 文本段落列表
+        """
+        if len(text) <= max_length:
+            return [text]
+        
+        chunks = []
+        current_chunk = ""
+        
+        for line in text.split('\n'):
+            if len(current_chunk) + len(line) + 1 <= max_length:
+                current_chunk += line + '\n'
+            else:
+                if current_chunk:
+                    chunks.append(current_chunk.strip())
+                current_chunk = line + '\n'
+        
+        if current_chunk:
+            chunks.append(current_chunk.strip())
+        
+        return chunks
+    
+    def _format_data_fallback(self, data: List[Dict], intent: Dict) -> str:
+        """
+        当AI总结失败时的备用格式化方法
+        :param data: 查询结果数据
+        :param intent: 查询意图
+        :return: 格式化的文本
+        """
+        if not data:
+            return "没有找到相关数据。"
+        
+        result = f"查询到 {len(data)} 条记录：\n\n"
+        
+        for i, row in enumerate(data[:10], 1):  # 最多显示10条
+            result += f"**记录 {i}:**\n"
+            for key, value in row.items():
+                result += f"  • {key}: {value}\n"
+            result += "\n"
+        
+        if len(data) > 10:
+            result += f"... 还有 {len(data) - 10} 条记录未显示\n"
+        
+        return result
+    
     @app_commands.command(name="chatwithai", description="与AI聊天")
     @app_commands.describe(
         message="要发送给AI的消息"
@@ -351,7 +533,7 @@ class BotCommands(commands.Cog):
         一次只能有一个用户对话，3分钟无活动自动结束
         """
         # 检查频道权限
-        if not self.check_channel_permission(interaction.channel_id):
+        if not self.check_channel_permission(interaction.channel_id, ALLOWED_CHANNELS_AI):
             await interaction.response.send_message(
                 "❌ 此命令不能在当前频道使用！",
                 ephemeral=True
@@ -380,6 +562,7 @@ class BotCommands(commands.Cog):
                 if self.current_chat_user != user_id:
                     self.current_chat_user = user_id
                     self.current_chat_channel = channel_id
+
                     self.chat_messages = [
                         {
                             "role": "system",
@@ -388,7 +571,7 @@ class BotCommands(commands.Cog):
                                 "回答游戏相关问题。请用简洁清晰的中文回答。"
                             )
                         }
-                    ]
+                    ] #preset system prompt
                     print(f"[AI Chat] 开始与用户 {user_name} ({user_id}) 的新对话")
                 
                 # 更新活动时间
@@ -398,34 +581,41 @@ class BotCommands(commands.Cog):
                 self.chat_messages.append({
                     "role": "user",
                     "content": message
-                })
+                }) #add user message into context
                 
-                # 调用AI获取响应
+                # call ollama api to get ai response
                 try:
                     ai_response = await self._call_ollama_api(self.chat_messages)
                     
                     if ai_response:
-                        # 添加AI响应到历史
+                        # add ai response into context
                         self.chat_messages.append({
                             "role": "assistant",
                             "content": ai_response
                         })
                         
-                        # 创建响应Embed
+                        # create response embed
                         embed = discord.Embed(
                             title="🤖 AI助手",
                             color=discord.Color.green()
                         )
                         embed.add_field(
                             name="💬 你的消息",
-                            value=message[:1024],  # Discord字段限制
+                            value=message[:1024],  # discord field limit
                             inline=False
                         )
-                        embed.add_field(
-                            name="🔮 AI回复",
-                            value=ai_response[:1024],  # Discord字段限制
-                            inline=False
-                        )
+                        if len(ai_response) > 1024:
+                            embed.add_field(
+                                name="🔮 AI回复",
+                                value=ai_response[:1024],  # discord field limit
+                                inline=False
+                            )
+                            embed.add_field(
+                                name="🔮 AI回复",
+                                value=ai_response[1024:2048],  # discord field limit
+                                inline=False
+                            )
+                        
                         embed.set_footer(text=f"对话轮数: {(len(self.chat_messages) - 1) // 2} | 3分钟无活动将自动结束")
                         
                         await interaction.followup.send(embed=embed)
@@ -468,7 +658,7 @@ class BotCommands(commands.Cog):
         手动结束AI对话，清理上下文
         """
         # 检查频道权限
-        if not self.check_channel_permission(interaction.channel_id):
+        if not self.check_channel_permission(interaction.channel_id, ALLOWED_CHANNELS_AI):
             await interaction.response.send_message(
                 "❌ 此命令不能在当前频道使用！",
                 ephemeral=True

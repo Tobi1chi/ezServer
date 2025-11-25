@@ -450,7 +450,7 @@ class EzServer:
 
             # Add event to global event history
             new_event = self.global_event_history_template.copy()
-            new_event["event_type"] = "BVR_KILL"
+            new_event["event_type"] = f"{FSM_MAPS[self.current_state]['map_type']}_KILL"
             new_event["datetime"] = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S") #same format as the sqlite3 datetime format
             new_event["killer_id"] = next((p for p in self.online_players if p["playername"] == killer_name), None)["steam_id"]
             new_event["killer_name"] = killer_name
@@ -489,7 +489,7 @@ PUBLIC = True
 UNIT_ICON = False
 BASE_PATH = Path(r"C:\Users\28262\AppData\Roaming\Boundless Dynamics, LLC\VTOLVR\SaveData\Replays")
 LOCAL_PATH = Path(__file__).parent
-AUTOSAVE_PATH = BASE_PATH / "Autosave1"
+AUTOSAVE_PATH = BASE_PATH / "Autosave 9"
 DEBUG = False
 RAND_MODE = False
 
@@ -542,6 +542,7 @@ def restart_server(state:str):
 def end_state(state:str):
     online_players = server.online_players #save online players list to local variable
     server.send_message("skip")
+    server.wait_for_response("SaveComplete", timeout=60) #wait for autosave complete
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
     try:
         responses = server.send_and_wait("flightlog", "GetFlightLog", timeout=10)
@@ -864,9 +865,6 @@ def main():
         print("无法连接到服务器，程序退出")
         return
     _test()
-    while DEBUG:
-        time.sleep(1)
-    
     print("--------------------------------")
     print("已加载的FSM状态:")
     for k, v in FSM_MAPS.items():

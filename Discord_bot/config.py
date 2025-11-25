@@ -14,15 +14,17 @@ DISCORD_GUILD_ID: Optional[str] = os.getenv("DISCORD_GUILD_ID", None)
 # 右键频道 -> 复制频道ID（需要开启开发者模式）
 DISCORD_CHANNEL_BOTCOMMAND_ID = 1440543916997873805
 DISCORD_CHANNEL_AI_ID = 1440566691863203981
-ALLOWED_CHANNELS: List[int] = [
-    DISCORD_CHANNEL_BOTCOMMAND_ID,
-    DISCORD_CHANNEL_AI_ID,
+ALLOWED_CHANNELS_BOTCOMMAND: List[int] = [
+    DISCORD_CHANNEL_BOTCOMMAND_ID
+]
+ALLOWED_CHANNELS_AI: List[int] = [
+    DISCORD_CHANNEL_AI_ID
 ]
 # ==================== Ollama AI 配置 ====================
 
 OLLAMA_CONFIG = {
     "url": "http://127.0.0.1:11434",
-    "model": "qwen2.5:7b",  # 使用的AI模型
+    "model": "qwen3:4b-instruct-2507-q4_K_M",  # 使用的AI模型
     "timeout": 300,  # API超时时间（秒）
     "chat_timeout": 180,  # 对话无活动自动结束时间（秒）
 }
