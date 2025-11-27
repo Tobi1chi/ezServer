@@ -8,7 +8,7 @@ import datetime
 import re 
 from EloSystem import WEAPON_ELO_MULTIPLIER, AIRCRAFT_ELO_MULTIPLIER
 
-DEBUG = True
+DEBUG = False
 FLIGHTLOG_DB_PATH = Path(__file__).parent /"DataBase"/"flightlogDB.sqlite"
 TEST_PATH = Path(__file__).parent /"MergeLarge_20251114_120521"/"flightlog.json"
 DB_DIR = Path(__file__).parent /"DataBase"
@@ -414,19 +414,25 @@ class flightlogDB:
                 """,
                 (steam_id,)
             )
-            db_elo = cur.fetchone()
-            if db_elo[0] != player_elo: #god damn type diff......
-                print(f"[ERROR] Player {player_name} (ID: {steam_id}) Elo is not correct: {player_elo} != {db_elo[0]}")
+            db_row = cur.fetchone()
+            if not db_row:
+                print(f"[ERROR] Player {player_name} (ID: {steam_id}) not found in database")
+                conn.rollback()
+                conn.close()
+                raise ValueError(f"Player {player_name} (ID: {steam_id}) not found in database")
+            db_elo = db_row[0]
+            if db_elo != player_elo: #god damn type diff......
+                print(f"[ERROR] Player {player_name} (ID: {steam_id}) Elo is not correct: {player_elo} != {db_elo}")
                 print("[Database] Database contains wrong Elo value")
                 conn.rollback()
                 conn.close()
-                raise ValueError(f"Player {player_name} (ID: {steam_id}) Elo is not correct: {player_elo} != {db_elo[0]}")
+                raise ValueError(f"Player {player_name} (ID: {steam_id}) Elo is not correct: {player_elo} != {db_elo}")
             else:
                 cur.execute(
                     f"""
                     UPDATE players SET {elo_type} = ? WHERE steam_id = ?
                     """,
-                    (player_elo_history + db_elo[0], steam_id)
+                    (player_elo_history + db_elo, steam_id)
                 )
                 conn.commit()
                 print(f"[Database] Player {player_name} (ID: {steam_id}) Elo updated to {player_elo_history + db_elo}")
