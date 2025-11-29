@@ -190,89 +190,125 @@ class EzServer:
                 self._pending_waiters.pop(waiter_id, None)
 
 
-    def wait_for_response(self, expected_src: Union[str, list], timeout: float = 5.0, consume: bool = True) -> list:    
+    def wait_for_response(self, expected_src: Union[str, list], timeout: float = 5.0, consume: bool = True, retry: int = 1) -> list:    
         """Wait for specific response type(s) from VTOL server. Raises ResponseTimeout on timeout."""
-        expected_set: Set[str]
-        if isinstance(expected_src, str):
-            expected_set = {expected_src}
-        else:
-            expected_set = set(expected_src)
+        def single_wait_for_response(expected_src: Union[str, list], timeout: float = 5.0, consume: bool = True) -> list:
+            expected_set: Set[str]
+            if isinstance(expected_src, str):
+                expected_set = {expected_src}
+            else:
+                expected_set = set(expected_src)
 
-        if not expected_set:
-            raise ValueError('expected_src cannot be empty')
+            if not expected_set:
+                raise ValueError('expected_src cannot be empty')
 
-        waiter_id = None
-        waiter: Union[PendingWaiter, None] = None
-        timeout_at = time.time() + timeout
+            waiter_id = None
+            waiter: Union[PendingWaiter, None] = None
+            timeout_at = time.time() + timeout
 
-        with self._waiter_lock:
-            # Reuse waiter reserved by send_and_wait (if present) so we do not miss fast responses
-            override_id = getattr(_waiter_tls, 'waiter_id', None)
-            if override_id is not None:
-                setattr(_waiter_tls, 'waiter_id', None)
-            if override_id:
-                waiter = self._pending_waiters.get(override_id)
-                if waiter:
-                    waiter.expected_src = expected_set
-                    waiter.consume = consume
-                    waiter.timeout_at = timeout_at
-                    waiter_id = override_id
-
-            if waiter is None:
-                waiter_id = f"waiter_{time.time()}_{id(self)}"
-                waiter = PendingWaiter(
-                    expected_src=expected_set,
-                    timeout_at=timeout_at,
-                    consume=consume,
-                )
-                self._pending_waiters[waiter_id] = waiter
-
-        try:
-            if not self.connected:
-                raise ConnectionError('服务器已断开连接, 无法等待响应')
-            event_signaled = waiter.event.wait(timeout)
-            if not self.connected:
-                raise ConnectionError('服务器已断开连接, 等待过程中断开')
-            if event_signaled and waiter.messages:
-                messages = list(waiter.messages)
-                waiter.messages.clear()
-                return messages
-            raise ResponseTimeout(f"No response for {expected_set} after {timeout}s")
-        finally:
             with self._waiter_lock:
-                self._pending_waiters.pop(waiter_id, None)
-
-
-    def send_and_wait(self, command: str, expected_src: Union[str, list], timeout: float = 5.0) -> list:
-        """Send command and wait for response (atomic operation). Prevents race conditions."""
-        expected_set: Set[str]
-        if isinstance(expected_src, str):
-            expected_set = {expected_src}
-        else:
-            expected_set = set(expected_src)
-        if not expected_set:
-            raise ValueError('expected_src cannot be empty')
-
-        waiter_id = f"waiter_{time.time()}_{id(self)}"
-        waiter = PendingWaiter(
-            expected_src=expected_set,
-            timeout_at=time.time() + timeout,
-            consume=True,
-        )
-
-        with self._waiter_lock:
-            # Register waiter under this thread so wait_for_response picks it up before routing completes
-            self._pending_waiters[waiter_id] = waiter
-            setattr(_waiter_tls, 'waiter_id', waiter_id)
-            self.send_message(command)
-
-        try:
-            return self.wait_for_response(expected_src, timeout)
-        finally:
-            with self._waiter_lock:
-                if getattr(_waiter_tls, 'waiter_id', None) == waiter_id:
+                # Reuse waiter reserved by send_and_wait (if present) so we do not miss fast responses
+                override_id = getattr(_waiter_tls, 'waiter_id', None)
+                if override_id is not None:
                     setattr(_waiter_tls, 'waiter_id', None)
-                self._pending_waiters.pop(waiter_id, None)
+                if override_id:
+                    waiter = self._pending_waiters.get(override_id)
+                    if waiter:
+                        waiter.expected_src = expected_set
+                        waiter.consume = consume
+                        waiter.timeout_at = timeout_at
+                        waiter_id = override_id
+
+                if waiter is None:
+                    waiter_id = f"waiter_{time.time()}_{id(self)}"
+                    waiter = PendingWaiter(
+                        expected_src=expected_set,
+                        timeout_at=timeout_at,
+                        consume=consume,
+                    )
+                    self._pending_waiters[waiter_id] = waiter
+
+            try:
+                if not self.connected:
+                    raise ConnectionError('服务器已断开连接, 无法等待响应')
+                event_signaled = waiter.event.wait(timeout)
+                if not self.connected:
+                    raise ConnectionError('服务器已断开连接, 等待过程中断开')
+                if event_signaled and waiter.messages:
+                    messages = list(waiter.messages)
+                    waiter.messages.clear()
+                    return messages
+                raise ResponseTimeout(f"No response for {expected_set} after {timeout}s")
+            finally:
+                with self._waiter_lock:
+                    self._pending_waiters.pop(waiter_id, None)
+        
+        # 重试逻辑：只在 retry > 1 时生效
+        if retry < 1:
+            retry = 1
+        
+        for attempt in range(retry):
+            try:
+                return single_wait_for_response(expected_src, timeout, consume)
+            except ResponseTimeout as e:
+                if attempt < retry - 1:
+                    print(f'[WARN] 等待响应超时，准备第 {attempt + 2}/{retry} 次重试...')
+                    time.sleep(0.5)  # 短暂延迟后重试
+                else:
+                    # 最后一次尝试也失败，抛出异常
+                    raise
+
+    def send_and_wait(self, command: str, expected_src: Union[str, list], timeout: float = 5.0, retry: int = 3) -> list:
+        """Send command and wait for response with retry support (atomic operation). Prevents race conditions."""
+        expected_set: Set[str]
+        if isinstance(expected_src, str):
+            expected_set = {expected_src}
+        else:
+            expected_set = set(expected_src)
+        if not expected_set:
+            raise ValueError('expected_src cannot be empty')
+        
+        if retry < 1:
+            retry = 1
+        
+        for attempt in range(retry):
+            waiter_id = f"waiter_{time.time()}_{id(self)}_{attempt}"
+            waiter = PendingWaiter(
+                expected_src=expected_set,
+                timeout_at=time.time() + timeout,
+                consume=True,
+            )
+
+            with self._waiter_lock:
+                # Register waiter under this thread so wait_for_response picks it up before routing completes
+                self._pending_waiters[waiter_id] = waiter
+                setattr(_waiter_tls, 'waiter_id', waiter_id)
+                self.send_message(command)
+
+            try:
+                return self.wait_for_response(expected_src, timeout)
+            except ResponseTimeout as e:
+                # 清理当前尝试的 waiter
+                with self._waiter_lock:
+                    if getattr(_waiter_tls, 'waiter_id', None) == waiter_id:
+                        setattr(_waiter_tls, 'waiter_id', None)
+                    self._pending_waiters.pop(waiter_id, None)
+                
+                # 如果还有重试机会，等待一下再重试
+                if attempt < retry - 1:
+                    print(f'[WARN] 命令 "{command}" 等待响应超时，准备第 {attempt + 2}/{retry} 次重试...')
+                    time.sleep(0.5)  # 短暂延迟后重试
+                else:
+                    # 最后一次尝试也失败，抛出异常
+                    print(f'[ERROR] 命令 "{command}" 在 {retry} 次尝试后仍然超时')
+                    raise
+            except Exception as e:
+                # 其他异常立即清理并抛出
+                with self._waiter_lock:
+                    if getattr(_waiter_tls, 'waiter_id', None) == waiter_id:
+                        setattr(_waiter_tls, 'waiter_id', None)
+                    self._pending_waiters.pop(waiter_id, None)
+                raise
 
     def wait_lobby_period(self, seconds: int, on_complete: Callable) -> None:
         '''Start non-blocking lobby timer. Callback fires after duration.'''
@@ -493,18 +529,14 @@ AUTOSAVE_PATH = BASE_PATH / "Autosave 9"
 DEBUG = False
 RAND_MODE = False
 
-
+STATE = 'state'
 FSM_MAPS: dict = {
-    "state1": {"campaign_id":"2860956181", "mapname":"BVR Ethi5", "map_type":"BVR"},
-    "state2": {"campaign_id":"3355613749", "mapname":"MergeLarge", "map_type":"BFM"},
-    "state3": {"campaign_id":"2860956181", "mapname":"BVR Archipel", "map_type":"BVR"},
-    "state4": {"campaign_id":"2860956181", "mapname":"BVR Ocixem", "map_type":"BVR"},
-    "state5": {"campaign_id":"2860956181", "mapname":"BVR Crack", "map_type":"BVR"},
-    "state6": {"campaign_id":"2860956181", "mapname":"BVR afMtnsHills", "map_type":"BVR"},
-    "state7": {"campaign_id":"3583755382", "mapname":"Dragon's Valley", "map_type":"BVR"},
-    "state8": {"campaign_id":"3583755382", "mapname":"Fjord Coast", "map_type":"BVR"},
+    "state1": {"campaign_id":"3355613749", "mapname":"MergeLarge", "map_type":"BFM"},
+    "state2": {"campaign_id":"2860956181", "mapname":"BVR Archipel", "map_type":"BVR"},
+    "state3": {"campaign_id":"3583755382", "mapname":"Dragon's Valley", "map_type":"BVR"},
+    "state4": {"campaign_id":"3583755382", "mapname":"Fjord Coast", "map_type":"BVR"},
 }
-
+FSM_STATE_NUM = len(FSM_MAPS)
 def init_server(state:str):
     server.current_state = state #update current state
     server.send_message("sethost name " + SERVER_NAME)
@@ -535,7 +567,7 @@ def restart_server(state:str):
     server.current_state = state #update current state
     server.send_message(f"sethost campaign {FSM_MAPS[state]['campaign_id']}")
     server.send_message(f"sethost mission {FSM_MAPS[state]['mapname']}")
-    time.sleep(1) #看来是必须加这个延迟了，不然会偶发性有bug
+    time.sleep(5) #看来是必须加这个延迟了，不然会偶发性有bug
     server.send_and_wait("restart", "LobbyReady", timeout=60*3)
 
 
@@ -679,20 +711,22 @@ def _test():
 def _state1():
     global count_num
     print("State 1\n")
+    print(f"FSM_STATE_NUM: {FSM_STATE_NUM}\n")
+    current_state = (count_num+1)%FSM_STATE_NUM
     print(f"count_num: {count_num}\n")
-    duration = 1 * H2S
+    duration = 0.5 * H2S
     time_prepare = 60 #time for read briefing
     if count_num == 0:
-        init_server("state1")
+        init_server(f'{STATE}{current_state}')
         count_num += 1
     else:
-        restart_server("state1")
+        restart_server(f'{STATE}{current_state}')
         count_num += 1
     def on_lobby_complete():
         server.send_message("start")
 
         def on_match_complete():
-            end_state("state1")
+            end_state(f'{STATE}{current_state}')
             server._state_complete.set()
 
         server.wait_match_duration(duration, on_match_complete)
@@ -701,21 +735,25 @@ def _state1():
 
 def _state2():
     global count_num
-    duration = 1 * 20 * 60 #20 minutes
+    duration = 1 * H2S
     time_prepare = 60 #time for read briefing
     print("State 2\n")
     print(f"count_num: {count_num}\n")
+    current_state = (count_num)%FSM_STATE_NUM
+    current_state += 1
+    print(f"current_state: {current_state}\n")
+    print(f"FSM_STATE_NUM: {FSM_STATE_NUM}\n")
     if count_num == 0:
-        init_server("state2")
+        init_server(f'{STATE}{current_state}')
         count_num += 1
     else:
-        restart_server("state2")
+        restart_server(f'{STATE}{current_state}')
         count_num += 1
     def on_lobby_complete():
         server.send_message("start")
 
         def on_match_complete():
-            end_state("state2")
+            end_state(f'{STATE}{current_state}')
             server._state_complete.set()
 
         server.wait_match_duration(duration, on_match_complete)
@@ -726,19 +764,21 @@ def _state3():
     global count_num
     duration = 1 * H2S
     time_prepare = 60 #time for read briefing
+    current_state = (count_num)%FSM_STATE_NUM
+    current_state += 1
     print("State 3\n")
     print(f"count_num: {count_num}\n")
     if count_num == 0:
-        init_server("state3")
+        init_server(f'{STATE}{current_state}')
         count_num += 1
     else:
-        restart_server("state3")
+        restart_server(f'{STATE}{current_state}')
         count_num += 1
     def on_lobby_complete():
         server.send_message("start")
 
         def on_match_complete():
-            end_state("state3")
+            end_state(f'{STATE}{current_state}')
             server._state_complete.set()
 
         server.wait_match_duration(duration, on_match_complete)
@@ -749,118 +789,55 @@ def _state4():
     global count_num
     duration = 1 * H2S
     time_prepare = 60 #time for read briefing
+    current_state = (count_num)%FSM_STATE_NUM
+    current_state += 1
     print("State 4\n")
     print(f"count_num: {count_num}\n")
     if count_num == 0:
-        init_server("state4")
+        init_server(f'{STATE}{current_state}')
         count_num += 1
     else:
-        restart_server("state4")
+        restart_server(f'{STATE}{current_state}')
         count_num += 1
     def on_lobby_complete():
         server.send_message("start")
 
         def on_match_complete():
-            end_state("state4")
+            end_state(f'{STATE}{current_state}')
             server._state_complete.set()
 
         server.wait_match_duration(duration, on_match_complete)
 
     server.wait_lobby_period(time_prepare, on_lobby_complete)
 
-def _state5():
+def _state_template(state:str):
     global count_num
     duration = 1 * H2S
     time_prepare = 60 #time for read briefing
-    print("State 5\n")
+    current_state = (count_num)%FSM_STATE_NUM
+    current_state += 1
+    print(f"State {state}\n")
     print(f"count_num: {count_num}\n")
     if count_num == 0:
-        init_server("state5")
+        init_server(f'{STATE}{current_state}')
         count_num += 1
     else:
-        restart_server("state5")
+        restart_server(f'{STATE}{current_state}')
         count_num += 1
     def on_lobby_complete():
         server.send_message("start")
-
         def on_match_complete():
-            end_state("state5")
+            end_state(f'{STATE}{current_state}')
             server._state_complete.set()
-
-        server.wait_match_duration(duration, on_match_complete)
-
-    server.wait_lobby_period(time_prepare, on_lobby_complete)
-
-def _state6():
-    global count_num
-    duration = 1 * H2S
-    time_prepare = 60 #time for read briefing
-    print("State 6\n")
-    print(f"count_num: {count_num}\n")
-    if count_num == 0:
-        init_server("state6")
-        count_num += 1
-    else:
-        restart_server("state6")
-        count_num += 1
-    def on_lobby_complete():
-        server.send_message("start")
-
-        def on_match_complete():
-            end_state("state6")
-            server._state_complete.set()
-
-        server.wait_match_duration(duration, on_match_complete)
-
-    server.wait_lobby_period(time_prepare, on_lobby_complete)
-
-
-def _state7():
-    global count_num
-    duration = 1 * H2S
-    time_prepare = 60 #time for read briefing
-    print("State 7\n")
-    print(f"count_num: {count_num}\n")
-    if count_num == 0:
-        init_server("state7")
-        count_num += 1
-    else:
-        restart_server("state7")
-        count_num += 1
-    def on_lobby_complete():
-        server.send_message("start")
-
-        def on_match_complete():
-            end_state("state7")
-            server._state_complete.set()
-
-        server.wait_match_duration(duration, on_match_complete)
-    server.wait_lobby_period(time_prepare, on_lobby_complete)
-
-def _state8():
-    global count_num
-    duration = 1 * H2S
-    time_prepare = 60 #time for read briefing
-    print("State 8\n")
-    print(f"count_num: {count_num}\n")
-    if count_num == 0:
-        init_server("state8")
-        count_num += 1
-    else:
-        restart_server("state8")
-        count_num += 1
-    def on_lobby_complete():
-        server.send_message("start")
-
-        def on_match_complete():
-            end_state("state8")
-            server._state_complete.set()
-
         server.wait_match_duration(duration, on_match_complete)
     server.wait_lobby_period(time_prepare, on_lobby_complete)
 
 def main():
-    FSM_Nodes = [_state1, _state2, _state3, _state4, _state5, _state6, _state7, _state8]
+    FSM_Nodes = []
+    for i in range(FSM_STATE_NUM):
+        str_state = f'_{STATE}{i+1}'
+        FSM_Nodes.append(getattr(sys.modules[__name__], str_state))
+    print(FSM_Nodes)
     if not server.start_server():
         print("无法连接到服务器，程序退出")
         return
