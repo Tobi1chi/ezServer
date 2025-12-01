@@ -37,6 +37,7 @@ DB/
 DataBase/
 Discord_bot/temp/
 Discord_bot/*.md
+Flightlog_Latest.json
 
 # PyInstaller
 #   Usually these files are written by a python script from a template

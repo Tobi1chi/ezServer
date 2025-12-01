@@ -712,7 +712,7 @@ def _state1():
     global count_num
     print("State 1\n")
     print(f"FSM_STATE_NUM: {FSM_STATE_NUM}\n")
-    current_state = (count_num+1)%FSM_STATE_NUM
+    current_state = 1  # 固定使用 state1
     print(f"count_num: {count_num}\n")
     duration = 0.5 * H2S
     time_prepare = 60 #time for read briefing
@@ -732,15 +732,14 @@ def _state1():
         server.wait_match_duration(duration, on_match_complete)
 
     server.wait_lobby_period(time_prepare, on_lobby_complete)
-
+    time.sleep(5)
 def _state2():
     global count_num
     duration = 1 * H2S
     time_prepare = 60 #time for read briefing
     print("State 2\n")
     print(f"count_num: {count_num}\n")
-    current_state = (count_num)%FSM_STATE_NUM
-    current_state += 1
+    current_state = 2  # 固定使用 state2
     print(f"current_state: {current_state}\n")
     print(f"FSM_STATE_NUM: {FSM_STATE_NUM}\n")
     if count_num == 0:
@@ -759,13 +758,12 @@ def _state2():
         server.wait_match_duration(duration, on_match_complete)
 
     server.wait_lobby_period(time_prepare, on_lobby_complete)
-
+    time.sleep(5)
 def _state3():
     global count_num
     duration = 1 * H2S
     time_prepare = 60 #time for read briefing
-    current_state = (count_num)%FSM_STATE_NUM
-    current_state += 1
+    current_state = 3  # 固定使用 state3
     print("State 3\n")
     print(f"count_num: {count_num}\n")
     if count_num == 0:
@@ -784,13 +782,13 @@ def _state3():
         server.wait_match_duration(duration, on_match_complete)
 
     server.wait_lobby_period(time_prepare, on_lobby_complete)
+    time.sleep(5)
 
 def _state4():
     global count_num
     duration = 1 * H2S
     time_prepare = 60 #time for read briefing
-    current_state = (count_num)%FSM_STATE_NUM
-    current_state += 1
+    current_state = 4  # 固定使用 state4
     print("State 4\n")
     print(f"count_num: {count_num}\n")
     if count_num == 0:
@@ -809,6 +807,7 @@ def _state4():
         server.wait_match_duration(duration, on_match_complete)
 
     server.wait_lobby_period(time_prepare, on_lobby_complete)
+    time.sleep(5)
 
 def _state_template(state:str):
     global count_num
@@ -831,11 +830,12 @@ def _state_template(state:str):
             server._state_complete.set()
         server.wait_match_duration(duration, on_match_complete)
     server.wait_lobby_period(time_prepare, on_lobby_complete)
+    time.sleep(5)
 
 def main():
     FSM_Nodes = []
-    for i in range(FSM_STATE_NUM):
-        str_state = f'_{STATE}{i+1}'
+    for i in range(1,FSM_STATE_NUM+1):
+        str_state = f'_{STATE}{i}'
         FSM_Nodes.append(getattr(sys.modules[__name__], str_state))
     print(FSM_Nodes)
     if not server.start_server():
@@ -847,8 +847,15 @@ def main():
     for k, v in FSM_MAPS.items():
         print(k, "=>", v["mapname"])
     print("--------------------------------")
-    start_index = input("请输入起始状态(从0开始): ")
-    start_index = int(start_index)
+    while True:
+        start_index = input("请输入起始状态: ")
+        start_index = int(start_index)
+        start_index -= 1
+        if start_index is not int or start_index not in range(1, FSM_STATE_NUM+1):
+            print("输入无效，请输入1到4之间的数字")
+        else:
+            break
+    
     if RAND_MODE:
         while True:
             random.choice(FSM_Nodes)()
