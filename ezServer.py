@@ -809,26 +809,25 @@ def _state4():
     server.wait_lobby_period(time_prepare, on_lobby_complete)
     time.sleep(5)
 
-def _state_template(state:str):
+def _state_template(state:int, duration:int, time_prepare:int):
     global count_num
-    duration = 1 * H2S
-    time_prepare = 60 #time for read briefing
-    current_state = (count_num)%FSM_STATE_NUM
-    current_state += 1
     print(f"State {state}\n")
     print(f"count_num: {count_num}\n")
     if count_num == 0:
-        init_server(f'{STATE}{current_state}')
+        init_server(f'{STATE}{state}')
         count_num += 1
     else:
-        restart_server(f'{STATE}{current_state}')
+        restart_server(f'{STATE}{state}')
         count_num += 1
     def on_lobby_complete():
         server.send_message("start")
+
         def on_match_complete():
-            end_state(f'{STATE}{current_state}')
+            end_state(f'{STATE}{state}')
             server._state_complete.set()
+
         server.wait_match_duration(duration, on_match_complete)
+
     server.wait_lobby_period(time_prepare, on_lobby_complete)
     time.sleep(5)
 
@@ -851,7 +850,9 @@ def main():
         start_index = input("请输入起始状态: ")
         start_index = int(start_index)
         start_index -= 1
-        if start_index is not int or start_index not in range(1, FSM_STATE_NUM+1):
+        if start_index not in range(FSM_STATE_NUM):
+            print(start_index)
+            print(type(start_index))
             print("输入无效，请输入1到4之间的数字")
         else:
             break
