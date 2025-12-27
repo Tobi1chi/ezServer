@@ -99,7 +99,7 @@
     "help": "Exit application"
 
 ## Example
-### 开始游戏（首次开始)
+### 开始游戏（首次开始）
 
     sethost name SERVERNAME
     sethost password PASSWORD //public server if the PASSWORD is empty

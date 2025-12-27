@@ -420,6 +420,7 @@ class EzServer:
             "steam_id": steam_id,
             "in_game_elo": player_db.get(f"current_elo_{map_type}"),
             "ingame_elo_history": [],
+            "Teams": "Allied",
             "connected": True
         }
         self.online_players.append(player_dict)
@@ -708,128 +709,54 @@ def _test():
         return
     print(dict_received_message.get("msg", "No msg field"))
 
-def _state1():
-    global count_num
-    print("State 1\n")
-    print(f"FSM_STATE_NUM: {FSM_STATE_NUM}\n")
-    current_state = 1  # 固定使用 state1
-    print(f"count_num: {count_num}\n")
-    duration = 0.5 * H2S
-    time_prepare = 60 #time for read briefing
-    if count_num == 0:
-        init_server(f'{STATE}{current_state}')
+def make_state(
+    state: str,
+    *,
+    label: str,
+    duration: float,
+    time_prepare: int = 60,
+    post_schedule_sleep: float = 5.0,
+) -> Callable[[], None]:
+    def _run() -> None:
+        global count_num
+        print(f"{label}\n")
+        print(f"count_num: {count_num}\n")
+
+        if count_num == 0:
+            init_server(state)
+        else:
+            restart_server(state)
         count_num += 1
-    else:
-        restart_server(f'{STATE}{current_state}')
-        count_num += 1
-    def on_lobby_complete():
-        server.send_message("start")
 
-        def on_match_complete():
-            end_state(f'{STATE}{current_state}')
-            server._state_complete.set()
+        def on_lobby_complete() -> None:
+            server.send_message("start")
 
-        server.wait_match_duration(duration, on_match_complete)
+            def on_match_complete() -> None:
+                end_state(state)
+                server._state_complete.set()
 
-    server.wait_lobby_period(time_prepare, on_lobby_complete)
-    time.sleep(5)
-def _state2():
-    global count_num
-    duration = 1 * H2S
-    time_prepare = 60 #time for read briefing
-    print("State 2\n")
-    print(f"count_num: {count_num}\n")
-    current_state = 2  # 固定使用 state2
-    print(f"current_state: {current_state}\n")
-    print(f"FSM_STATE_NUM: {FSM_STATE_NUM}\n")
-    if count_num == 0:
-        init_server(f'{STATE}{current_state}')
-        count_num += 1
-    else:
-        restart_server(f'{STATE}{current_state}')
-        count_num += 1
-    def on_lobby_complete():
-        server.send_message("start")
+            server.wait_match_duration(int(duration), on_match_complete)
 
-        def on_match_complete():
-            end_state(f'{STATE}{current_state}')
-            server._state_complete.set()
+        server.wait_lobby_period(time_prepare, on_lobby_complete)
+        if post_schedule_sleep:
+            time.sleep(post_schedule_sleep)
 
-        server.wait_match_duration(duration, on_match_complete)
+    _run.__name__ = f"_{state}"
+    return _run
 
-    server.wait_lobby_period(time_prepare, on_lobby_complete)
-    time.sleep(5)
-def _state3():
-    global count_num
-    duration = 1 * H2S
-    time_prepare = 60 #time for read briefing
-    current_state = 3  # 固定使用 state3
-    print("State 3\n")
-    print(f"count_num: {count_num}\n")
-    if count_num == 0:
-        init_server(f'{STATE}{current_state}')
-        count_num += 1
-    else:
-        restart_server(f'{STATE}{current_state}')
-        count_num += 1
-    def on_lobby_complete():
-        server.send_message("start")
 
-        def on_match_complete():
-            end_state(f'{STATE}{current_state}')
-            server._state_complete.set()
+FSM_DEFAULT_DURATION = 1 * H2S
+FSM_DURATIONS = {
+    "state1": 0.5 * H2S,
+}
 
-        server.wait_match_duration(duration, on_match_complete)
-
-    server.wait_lobby_period(time_prepare, on_lobby_complete)
-    time.sleep(5)
-
-def _state4():
-    global count_num
-    duration = 1 * H2S
-    time_prepare = 60 #time for read briefing
-    current_state = 4  # 固定使用 state4
-    print("State 4\n")
-    print(f"count_num: {count_num}\n")
-    if count_num == 0:
-        init_server(f'{STATE}{current_state}')
-        count_num += 1
-    else:
-        restart_server(f'{STATE}{current_state}')
-        count_num += 1
-    def on_lobby_complete():
-        server.send_message("start")
-
-        def on_match_complete():
-            end_state(f'{STATE}{current_state}')
-            server._state_complete.set()
-
-        server.wait_match_duration(duration, on_match_complete)
-
-    server.wait_lobby_period(time_prepare, on_lobby_complete)
-    time.sleep(5)
-
-def _state_template(state:int, duration:int, time_prepare:int):
-    global count_num
-    print(f"State {state}\n")
-    print(f"count_num: {count_num}\n")
-    if count_num == 0:
-        init_server(f'{STATE}{state}')
-        count_num += 1
-    else:
-        restart_server(f'{STATE}{state}')
-        count_num += 1
-    def on_lobby_complete():
-        server.send_message("start")
-
-        def on_match_complete():
-            end_state(f'{STATE}{state}')
-            server._state_complete.set()
-
-        server.wait_match_duration(duration, on_match_complete)
-
-    server.wait_lobby_period(time_prepare, on_lobby_complete)
-    time.sleep(5)
+for i in range(1, FSM_STATE_NUM + 1):
+    _state_name = f"{STATE}{i}"
+    globals()[f"_{_state_name}"] = make_state(
+        _state_name,
+        label=f"State {i}",
+        duration=FSM_DURATIONS.get(_state_name, FSM_DEFAULT_DURATION),
+    )
 
 def main():
     FSM_Nodes = []
