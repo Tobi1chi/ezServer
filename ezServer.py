@@ -442,62 +442,70 @@ class EzServer:
         if player_dict:
             player_dict["connected"] = False
                 # 名字用列表里的也可以，这里随你
-            print(f'[Event] Disconnected: {player_dict['playername']}')
+            print(f"[Event] Disconnected: {player_dict['playername']}")
             self._print_online_players()
             return True
         print(f'[ERROR] Player {playername} not found in online players')
         return False
+
+    def _find_online_player(self, playername: str) -> Union[dict, None]:
+        return next((p for p in self.online_players if p["playername"] == playername), None)
+
+    def _apply_ingame_elo_delta(self, player: dict, delta: float) -> float:
+        player["ingame_elo_history"].append(delta)
+        return player["in_game_elo"] + sum(player["ingame_elo_history"])
+
+    def _build_kill_event(
+        self,
+        killer_player: dict,
+        victim_player: dict,
+        victim_aircraft: str,
+        weapon: str,
+        delta: float,
+    ) -> dict:
+        new_event = self.global_event_history_template.copy()
+        new_event["event_type"] = f"{FSM_MAPS[self.current_state]['map_type']}_KILL"
+        new_event["datetime"] = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+        new_event["killer_id"] = killer_player["steam_id"]
+        new_event["killer_name"] = killer_player["playername"]
+        new_event["killer_aircraft"] = ""
+        new_event["victim_id"] = victim_player["steam_id"]
+        new_event["victim_name"] = victim_player["playername"]
+        new_event["victim_aircraft"] = victim_aircraft
+        new_event["weapon"] = weapon
+        new_event["elo_delta"] = delta
+        return new_event
         
     def _handle_kill_event(self, killer_name: str, aircraft: str, victim: str, weapon: str) -> bool:
         """Handle kill event and update ELO"""
         try:
+            killer_player = self._find_online_player(killer_name)
+            victim_player = self._find_online_player(victim)
+
+            missing_players = []
+            if killer_player is None:
+                missing_players.append(f'killer={killer_name}')
+            if victim_player is None:
+                missing_players.append(f'victim={victim}')
+            if missing_players:
+                print(f"[WARNING] Skip kill event because online player mapping is incomplete: {', '.join(missing_players)}")
+                return False
+
             delta = EloSystem.calculate_elo_change_from_log(
                 killer_name, aircraft, victim, weapon, FSM_MAPS[self.current_state]['map_type']
             )
             print(f'[Event] Kill Event: {killer_name} killed {aircraft} ({victim}) with {weapon}')
-            # Update player ELO
-            player_found_killer = False
-            player_found_victim = False
-            for player_killer in self.online_players:
-                if player_killer["playername"] == killer_name:
-                    killer_elo = player_killer["in_game_elo"]
-                    player_killer["ingame_elo_history"].append(delta)
-                    sum_elo_killer = sum(player_killer["ingame_elo_history"])
-                    player_found_killer = True
-                    break
-            
-            if not player_found_killer:
-                print(f'[WARNING] Killer {killer_name} not found in online players')
-            for player_victim in self.online_players:
-                if player_victim["playername"] == victim:
-                    victim_elo = player_victim["in_game_elo"]
-                    player_victim["ingame_elo_history"].append(-delta)
-                    sum_elo_victim = sum(player_victim["ingame_elo_history"])
-                    player_found_victim = True
-                    break
-            
-            if not player_found_victim:
-                print(f'[WARNING] Victim {victim} not found in online players')
-            
-            # Send log to server
-            log_msg_killer = f"ELO Change:{killer_name} +{delta}; New ELO: {sum_elo_killer+killer_elo}"
+            killer_new_elo = self._apply_ingame_elo_delta(killer_player, delta)
+            victim_new_elo = self._apply_ingame_elo_delta(victim_player, -delta)
+
+            log_msg_killer = f"ELO Change:{killer_name} +{delta}; New ELO: {killer_new_elo}"
             self.send_message(f"sendlog {log_msg_killer}")
-            log_msg_victim = f"ELO Change:{victim} -{delta}; New ELO: {sum_elo_victim+victim_elo}"
+            log_msg_victim = f"ELO Change:{victim} -{delta}; New ELO: {victim_new_elo}"
             self.send_message(f"sendlog {log_msg_victim}")
 
-            # Add event to global event history
-            new_event = self.global_event_history_template.copy()
-            new_event["event_type"] = f"{FSM_MAPS[self.current_state]['map_type']}_KILL"
-            new_event["datetime"] = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S") #same format as the sqlite3 datetime format
-            new_event["killer_id"] = next((p for p in self.online_players if p["playername"] == killer_name), None)["steam_id"]
-            new_event["killer_name"] = killer_name
-            new_event["killer_aircraft"] = ""
-            new_event["victim_id"] = next((p for p in self.online_players if p["playername"] == victim), None)["steam_id"]
-            new_event["victim_name"] = victim
-            new_event["victim_aircraft"] = aircraft
-            new_event["weapon"] = weapon
-            new_event["elo_delta"] = delta
-            self.global_event_history.append(new_event)
+            self.global_event_history.append(
+                self._build_kill_event(killer_player, victim_player, aircraft, weapon, delta)
+            )
 
             return True
             
@@ -573,109 +581,153 @@ def restart_server(state:str):
 
 
 def end_state(state:str):
-    online_players = server.online_players #save online players list to local variable
-    server.send_message("skip")
-    server.wait_for_response("SaveComplete", timeout=60) #wait for autosave complete
+    online_players = list(server.online_players)
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+
     try:
-        responses = server.send_and_wait("flightlog", "GetFlightLog", timeout=10)
-        raw = responses[0]
-    except ResponseTimeout:
-        print("没有收到 flightlog 响应,重新获取")
+        server.send_message("skip")
+        server.wait_for_response("SaveComplete", timeout=60)
+
+        raw = _request_flightlog()
+        if raw is None:
+            return
+
+        print("flightlog raw:", raw)
+        decoded = _decode_flightlog_response(raw)
+        if decoded is None:
+            return
+
+        msg = decoded.get("msg")
+        if msg is None:
+            print("flightlog 响应中没有 msg 字段:", decoded)
+            return
+
+        print("flightlog msg:")
+        for log in msg:
+            print(log)
+
+        msg_new = remove_adjacent_duplicates(msg)
+        msg_str = serialize_flightlog(msg_new)
+        with open(LOCAL_PATH/'Flightlog_Latest.json', "w", encoding='utf-8') as f:
+            f.write(msg_str)
+
+        archive_path = archive_match_bundle(state, timestamp, msg_str)
+        replay_info = build_replay_info(state, timestamp, archive_path)
+        if server.global_event_history:
+            save_ok = db_flightlog.save_global_event_history(server.global_event_history, replay_info, msg_new)
+            if save_ok:
+                db_flightlog.update_player_elo(online_players, FSM_MAPS[state]['map_type'])
+            else:
+                print("[ERROR] 跳过 Elo 落库更新，因为事件历史保存失败")
+    except Exception as e:
+        print(f"[ERROR] end_state failed for {state}: {e}")
+    finally:
+        server.global_event_history.clear()
+        server.online_players.clear()
+
+
+def remove_adjacent_duplicates(lst):
+    result = []
+    for x in lst:
+        if not result or result[-1] != x:
+            result.append(x)
+    return result
+
+
+def serialize_flightlog(flightlog_data) -> str:
+    if isinstance(flightlog_data, (list, dict)):
+        return json.dumps(flightlog_data, ensure_ascii=False, indent=2)
+    return str(flightlog_data)
+
+
+def _request_flightlog() -> Union[dict, None]:
+    for attempt in range(2):
         try:
             responses = server.send_and_wait("flightlog", "GetFlightLog", timeout=10)
-            raw = responses[0]
+            return responses[0]
         except ResponseTimeout:
-            print("没有收到 flightlog 响应")
-            raw = {}
+            if attempt == 0:
+                print("没有收到 flightlog 响应,重新获取")
+            else:
+                print("没有收到 flightlog 响应")
+    return None
 
-    print("flightlog raw:", raw)
 
+def _decode_flightlog_response(raw) -> Union[dict, None]:
     try:
-        if isinstance(raw, dict):
-            d = raw
-        else:
-            d = json.loads(raw)
-        src = d.get("src")
-        if not src or "GetFlightLog" not in src:
-            print("flightlog 响应中没有 GetFlightLog 字段:", d)
-            try:
-                responses = server.send_and_wait("flightlog", "GetFlightLog", timeout=10)
-                raw = responses[0]
-                print("flightlog raw:", raw)
-                if isinstance(raw, dict):
-                    d = raw
-                else:
-                    d = json.loads(raw)
-                src = d.get("src")
-                if not src or "GetFlightLog" not in src:
-                    print("flightlog 响应中没有 GetFlightLog 字段,退出")
-                    return
-            except ResponseTimeout:
-                print("flightlog 响应中没有 GetFlightLog 字段,退出")
-                return
+        decoded = raw if isinstance(raw, dict) else json.loads(raw)
     except json.JSONDecodeError as e:
         print("flightlog JSON 解析失败:", e)
-        return
+        return None
 
-    msg = d.get("msg")
-    if msg is None:
-        print("flightlog 响应中没有 msg 字段:", d)
-        return
-    print("flightlog msg:")
-    for log in msg:
-        print(log)
-    #remove adjacent duplicates
-    def remove_adjacent_duplicates(lst):
-        result = []
-        for x in lst:
-            if not result or result[-1] != x:
-                result.append(x)
-        return result
-    #washed flightlog
-    msg_new = remove_adjacent_duplicates(msg)
-    #save flightlog
-    if isinstance(msg_new, (list, dict)):
-        msg_str = json.dumps(msg_new, ensure_ascii=False, indent=2)
-    else:
-        msg_str = str(msg_new)
-    with open(LOCAL_PATH/'Flightlog_Latest.json', "w", encoding='utf-8') as f:
-        f.write(msg_str)
+    src = decoded.get("src")
+    if src and "GetFlightLog" in src:
+        return decoded
+
+    print("flightlog 响应中没有 GetFlightLog 字段:", decoded)
+    retry_raw = _request_flightlog()
+    if retry_raw is None:
+        print("flightlog 响应中没有 GetFlightLog 字段,退出")
+        return None
 
     try:
-        copy_folder(AUTOSAVE_PATH, LOCAL_PATH/"Replays"/f"{FSM_MAPS[state]['mapname']}_{timestamp}")
-        with open(LOCAL_PATH/"Replays"/f"{FSM_MAPS[state]['mapname']}_{timestamp}/flightlog.json", "w", encoding='utf-8') as f:
-            f.write(msg_str)
-        zip_folder(LOCAL_PATH/"Replays"/f"{FSM_MAPS[state]['mapname']}_{timestamp}", LOCAL_PATH/"Replays"/f"{FSM_MAPS[state]['mapname']}_{timestamp}")
-        delete_folder(LOCAL_PATH/"Replays"/f"{FSM_MAPS[state]['mapname']}_{timestamp}")
-        delete_folder(AUTOSAVE_PATH)
+        retry_decoded = retry_raw if isinstance(retry_raw, dict) else json.loads(retry_raw)
+    except json.JSONDecodeError as e:
+        print("flightlog JSON 解析失败:", e)
+        return None
 
+    retry_src = retry_decoded.get("src")
+    if not retry_src or "GetFlightLog" not in retry_src:
+        print("flightlog 响应中没有 GetFlightLog 字段,退出")
+        return None
+
+    return retry_decoded
+
+
+def archive_match_bundle(state: str, timestamp: str, flightlog_payload: str) -> Union[Path, None]:
+    replay_root = LOCAL_PATH / "Replays"
+    replay_dir = replay_root / f"{FSM_MAPS[state]['mapname']}_{timestamp}"
+    zip_path = replay_root / f"{FSM_MAPS[state]['mapname']}_{timestamp}.zip"
+    create_folder(replay_root)
+
+    try:
+        copy_folder(AUTOSAVE_PATH, replay_dir)
+        with open(replay_dir / "flightlog.json", "w", encoding='utf-8') as f:
+            f.write(flightlog_payload)
+        zip_folder(replay_dir, replay_dir)
+        delete_folder(AUTOSAVE_PATH)
+        return zip_path if zip_path.exists() else None
     except Exception as e:
         print(f"保存replay失败: {e}")
         print("单独保存flightlog")
-        create_folder(LOCAL_PATH/"Replays"/f"{FSM_MAPS[state]['mapname']}_{timestamp}")
-        with open(LOCAL_PATH/"Replays"/f"{FSM_MAPS[state]['mapname']}_{timestamp}/flightlog.json", "w", encoding='utf-8') as f:
-            f.write(msg_str)
-        zip_folder(LOCAL_PATH/"Replays"/f"{FSM_MAPS[state]['mapname']}_{timestamp}", LOCAL_PATH/"Replays"/f"{FSM_MAPS[state]['mapname']}_{timestamp}") #.zip is added in the function
-        delete_folder(LOCAL_PATH/"Replays"/f"{FSM_MAPS[state]['mapname']}_{timestamp}")
-
+        try:
+            create_folder(replay_dir)
+            with open(replay_dir / "flightlog.json", "w", encoding='utf-8') as f:
+                f.write(flightlog_payload)
+            zip_folder(replay_dir, replay_dir)
+            return zip_path if zip_path.exists() else None
+        except Exception as fallback_error:
+            print(f"保存flightlog压缩包失败: {fallback_error}")
+            return None
     finally:
-        #replay info
-        with open(LOCAL_PATH/"Replays"/f"{FSM_MAPS[state]['mapname']}_{timestamp}.zip","rb",) as f:
-            meta_blob = f.read()
-        replay_info = server.replay_info_template.copy()
-        replay_info["file_name"] = f"{FSM_MAPS[state]['mapname']}_{timestamp}.zip"
-        replay_info["map_name"] = FSM_MAPS[state]['mapname']
-        replay_info["played_at"] = timestamp
-        replay_info["meta_blob"] = meta_blob
-        replay_info["map_type"] = FSM_MAPS[state]['map_type']
-        #save global event history
-        if server.global_event_history:
-            db_flightlog.save_global_event_history(server.global_event_history, replay_info, msg_new)
-            db_flightlog.update_player_elo(online_players, FSM_MAPS[state]['map_type'])
-            
-        server.global_event_history.clear()
-        server.online_players.clear()
+        delete_folder(replay_dir)
+
+
+def build_replay_info(state: str, timestamp: str, archive_path: Union[Path, None]) -> dict:
+    replay_info = server.replay_info_template.copy()
+    replay_info["file_name"] = f"{FSM_MAPS[state]['mapname']}_{timestamp}.zip"
+    replay_info["map_name"] = FSM_MAPS[state]['mapname']
+    replay_info["played_at"] = timestamp
+    replay_info["map_type"] = FSM_MAPS[state]['map_type']
+
+    if archive_path and archive_path.exists():
+        with open(archive_path, "rb") as f:
+            replay_info["meta_blob"] = f.read()
+    else:
+        print("[WARN] Replay archive is missing, saving metadata without blob")
+        replay_info["meta_blob"] = b""
+
+    return replay_info
             
 
 def zip_folder(folder: Path, out_zip: Path):
