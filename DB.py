@@ -1,14 +1,9 @@
-from operator import ge
 import sqlite3
-import os
 from pathlib import Path
-from typing import List, Dict, Union
+from typing import Dict, Union
 import json
-import datetime
-import re 
-from EloSystem import WEAPON_ELO_MULTIPLIER, AIRCRAFT_ELO_MULTIPLIER
 
-DEBUG = True
+DEBUG = False
 FLIGHTLOG_DB_PATH = Path(__file__).parent /"DataBase"/"flightlogDB.sqlite"
 TEST_PATH = Path(__file__).parent /"MergeLarge_20251114_120521"/"flightlog.json"
 DB_DIR = Path(__file__).parent /"DataBase"
@@ -146,72 +141,92 @@ class flightlogDB:
         conn.commit()
         conn.close()
 
-    def get_player_by_steam_id(self, steam_id: str, steam_name: str, playername: str) -> Union[dict, None]:
-        conn = self.get_conn()
-        conn.row_factory = sqlite3.Row  # dict-like row
-        cur = conn.cursor()
-
-        # check if player exists
+    def _fetch_player_row(self, cur: sqlite3.Cursor, steam_id: str):
         cur.execute("SELECT * FROM players WHERE steam_id = ?", (steam_id,))
-        row = cur.fetchone()
+        return cur.fetchone()
 
-        # if player exists, return player info
-        if row is not None:
-            player_id = row["id"]
+    def _load_name_history(self, cur: sqlite3.Cursor, player_id: int) -> tuple[list[str], bool]:
+        name_row = cur.execute(
+            "SELECT * FROM player_names WHERE player_id = ?",
+            (player_id,)
+        ).fetchone()
 
-            # get player_names
-            name_row = cur.execute(
-                "SELECT * FROM player_names WHERE player_id = ?",
-                (player_id,)
-            ).fetchone()
+        if not name_row:
+            return [], False
 
-            if name_row:
-                name_list = json.loads(name_row["name"])
-            else:
-                # create new record
-                name_list = []
+        raw_names = name_row["name"]
+        try:
+            return json.loads(raw_names), True
+        except (TypeError, json.JSONDecodeError):
+            if DEBUG:
+                print(f"[WARN] Invalid player_names payload for player_id={player_id}: {raw_names!r}")
+            return [], True
 
-            # if new name is not in the list, add it
-            if playername not in name_list:
-                name_list.append(playername)
-                cur.execute(
-                    "UPDATE player_names SET name = ? WHERE player_id = ?",
-                    (json.dumps(name_list), player_id)
-                )
-                conn.commit()
-
-            # return player info + history names
-            result = dict(row)
-            result["name_history"] = name_list
-
-            conn.close()
-            return result
-
-        # if player does not exist, create new player
+    def _update_name_history(self, cur: sqlite3.Cursor, player_id: int, name_list: list[str]) -> None:
         cur.execute(
-            "INSERT INTO players (steam_id, steam_name) VALUES (?, ?)",
-            (steam_id, steam_name)
+            "UPDATE player_names SET name = ? WHERE player_id = ?",
+            (json.dumps(name_list), player_id)
         )
-        conn.commit()
 
-        # get new player
-        cur.execute("SELECT * FROM players WHERE steam_id = ?", (steam_id,))
-        new_row = cur.fetchone()
-        player_id = new_row["id"]
-
-        # initialize name history
-        name_list = [playername]
+    def _insert_name_history(self, cur: sqlite3.Cursor, player_id: int, name_list: list[str]) -> None:
         cur.execute(
             "INSERT INTO player_names (player_id, name) VALUES (?, ?)",
             (player_id, json.dumps(name_list))
         )
-        conn.commit()
 
-        result = dict(new_row)
+    def _ensure_player_record(
+        self,
+        cur: sqlite3.Cursor,
+        steam_id: str,
+        steam_name: str,
+        playername: str,
+    ) -> dict:
+        row = self._fetch_player_row(cur, steam_id)
+
+        if row is None:
+            cur.execute(
+                "INSERT INTO players (steam_id, steam_name) VALUES (?, ?)",
+                (steam_id, steam_name)
+            )
+            row = self._fetch_player_row(cur, steam_id)
+            player_id = row["id"]
+            name_list = [playername] if playername else []
+            self._insert_name_history(cur, player_id, name_list)
+        else:
+            player_id = row["id"]
+            if steam_name and row["steam_name"] != steam_name:
+                cur.execute(
+                    "UPDATE players SET steam_name = ? WHERE id = ?",
+                    (steam_name, player_id)
+                )
+                row = self._fetch_player_row(cur, steam_id)
+
+            name_list, has_name_history = self._load_name_history(cur, player_id)
+            if playername and playername not in name_list:
+                name_list.append(playername)
+                if has_name_history:
+                    self._update_name_history(cur, player_id, name_list)
+                else:
+                    self._insert_name_history(cur, player_id, name_list)
+            elif not name_list and playername:
+                name_list = [playername]
+                self._insert_name_history(cur, player_id, name_list)
+
+        result = dict(row)
         result["name_history"] = name_list
-
-        conn.close()
         return result
+
+    def get_player_by_steam_id(self, steam_id: str, steam_name: str, playername: str) -> Union[dict, None]:
+        conn = self.get_conn()
+        conn.row_factory = sqlite3.Row
+        cur = conn.cursor()
+
+        try:
+            result = self._ensure_player_record(cur, steam_id, steam_name, playername)
+            conn.commit()
+            return result
+        finally:
+            conn.close()
 
 
     def player_join(self, steam_id: str, steam_name: str,playername: str) -> dict:
@@ -227,9 +242,11 @@ class flightlogDB:
         :param flightlog: 原始飞行日志列表
         :return: True/False 表示是否成功
         """
+        conn = None
         try:
             if DEBUG: print(f"[DEBUG] Saving global event history: {global_event} \n\treplay_info: {replay_info} \n\tflightlog: {flightlog}")
             conn = self.get_conn()
+            conn.row_factory = sqlite3.Row
             cur = conn.cursor()
             elo_type = ELO_TYPE.get(replay_info.get("map_type"), "Unknown")
             if elo_type == "Unknown":
@@ -297,7 +314,8 @@ class flightlogDB:
                 
                 # 处理 player_events - killer
                 if event.get("killer_id"):
-                    killer_player = self.get_player_by_steam_id(
+                    killer_player = self._ensure_player_record(
+                        cur,
                         event.get("killer_id", ""),
                         event.get("killer_name", ""),
                         event.get("killer_name", "")
@@ -313,7 +331,8 @@ class flightlogDB:
                 
                 # 处理 player_events - victim
                 if event.get("victim_id"):
-                    victim_player = self.get_player_by_steam_id(
+                    victim_player = self._ensure_player_record(
+                        cur,
                         event.get("victim_id", ""),
                         event.get("victim_name", ""),
                         event.get("victim_name", "")
@@ -381,8 +400,9 @@ class flightlogDB:
             
         except Exception as e:
             print(f"Error saving global event history: {e}")
-            conn.rollback()
-            conn.close()
+            if conn is not None:
+                conn.rollback()
+                conn.close()
             return False
     
     def _determine_kill_type(self, killer_aircraft: str, victim_aircraft: str) -> str:
@@ -414,19 +434,25 @@ class flightlogDB:
                 """,
                 (steam_id,)
             )
-            db_elo = cur.fetchone()
-            if db_elo[0] != player_elo: #god damn type diff......
-                print(f"[ERROR] Player {player_name} (ID: {steam_id}) Elo is not correct: {player_elo} != {db_elo[0]}")
+            db_row = cur.fetchone()
+            if not db_row:
+                print(f"[ERROR] Player {player_name} (ID: {steam_id}) not found in database")
+                conn.rollback()
+                conn.close()
+                raise ValueError(f"Player {player_name} (ID: {steam_id}) not found in database")
+            db_elo = db_row[0]
+            if db_elo != player_elo: #god damn type diff......
+                print(f"[ERROR] Player {player_name} (ID: {steam_id}) Elo is not correct: {player_elo} != {db_elo}")
                 print("[Database] Database contains wrong Elo value")
                 conn.rollback()
                 conn.close()
-                raise ValueError(f"Player {player_name} (ID: {steam_id}) Elo is not correct: {player_elo} != {db_elo[0]}")
+                raise ValueError(f"Player {player_name} (ID: {steam_id}) Elo is not correct: {player_elo} != {db_elo}")
             else:
                 cur.execute(
                     f"""
                     UPDATE players SET {elo_type} = ? WHERE steam_id = ?
                     """,
-                    (player_elo_history + db_elo[0], steam_id)
+                    (player_elo_history + db_elo, steam_id)
                 )
                 conn.commit()
                 print(f"[Database] Player {player_name} (ID: {steam_id}) Elo updated to {player_elo_history + db_elo}")

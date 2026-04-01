@@ -20,7 +20,8 @@ MODEL_MAP = {
     "phi3": "phi3",
     "llama": "llama3.2:3b",
     "qwen2.5": "qwen2.5:7b",
-    "qwen3": "qwen3:4b-instruct-2507-q4_K_M",
+    "qwen3-4b": "qwen3:4b-instruct-2507-q4_K_M",
+    "qwen3-embed": "qwen3-embedding:4b-q4_K_M",
 }
 
 OLLAMA_EXE = os.path.join(CONFIG["OLLAMA_DIR"], "ollama.exe")
@@ -278,17 +279,19 @@ def choose_model() -> str:
     print("\n📦 请选择模型:")
     print("  1) phi3   ->", MODEL_MAP["phi3"])
     print("  2) llama  ->", MODEL_MAP["llama"])
-    print("  3) qwen   ->", MODEL_MAP["qwen2.5"])
-    print("  4) qwen3  ->", MODEL_MAP["qwen3"])
+    print("  3) qwen2.5   ->", MODEL_MAP["qwen2.5"])
+    print("  4) qwen3-4b  ->", MODEL_MAP["qwen3-4b"])
+    print("  5) qwen3-embed  ->", MODEL_MAP["qwen3-embed"])
 
-    choice = input("输入 1 / 2 / 3 (默认 1): ").strip()
+    choice = input("输入 1 - 5 (默认 1): ").strip()
 
     model_key = {
         "1": "phi3",
         "2": "llama",
         "3": "qwen2.5",
-        "4": "qwen3",
-    }.get(choice, "qwen3")
+        "4": "qwen3-4b",
+        "5": "qwen3-embed",
+    }.get(choice, "qwen3-4b")
 
     model_name = MODEL_MAP[model_key]
     print(f"✅ 已选择模型: {model_key} ({model_name})")

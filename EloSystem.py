@@ -11,6 +11,9 @@ WEAPON_ELO_MULTIPLIER = {
     "AIM-9E": 30.0, #I'm not sure it's 9e or 9E......
     "GAU-22": 20.0,
     "M230": 20.0,
+    "AGM-126":150.0,
+    "SideARM":150.0,
+    "HARM-SD":150.0 #Add harm kill elos
 } #Using fixed multiplier currently to calculate elo change
 AIRCRAFT_ELO_MULTIPLIER = {
     "F/A-26B": 4.0,

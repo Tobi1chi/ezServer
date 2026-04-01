@@ -6,13 +6,21 @@ RAG (Retrieval-Augmented Generation) 系统
 import sqlite3
 import json
 import re
-from typing import Dict, List, Optional, Tuple, Any
+from dataclasses import dataclass
+from datetime import datetime, timedelta
 from pathlib import Path
+from typing import Dict, List, Optional, Tuple, Any
 import sys
 
 # 添加父目录到路径
 sys.path.append(str(Path(__file__).parent.parent))
 from DB import FLIGHTLOG_DB_PATH, ELO_TYPE
+
+
+@dataclass
+class QueryPlan:
+    sql: str
+    params: List[Any]
 
 
 class IntentDetector:
@@ -34,16 +42,16 @@ class IntentDetector:
     
     # 关键词映射
     KEYWORDS = {
-        "player_recent_performance": ["最近", "表现", "战绩", "成绩", "近期"],
-        "player_stats_summary": ["统计", "数据", "总览", "概况", "信息"],
-        "player_elo_trend": ["elo", "分数", "趋势", "变化", "排名"],
-        "map_leaderboard": ["排行", "排名", "最好", "最强", "第一", "榜单"],
-        "recent_battles": ["战况", "战斗", "对局", "比赛"],
-        "weapon_analysis": ["武器", "装备", "导弹", "枪"],
-        "player_comparison": ["对比", "比较", "vs", "和"],
-        "battle_report": ["战报", "总结", "报告"],
-        "activity_analysis": ["活跃", "在线", "参与"],
-        "combat_style": ["风格", "打法", "特点", "习惯"],
+        "player_recent_performance": [("表现", 3), ("战绩", 3), ("成绩", 3), ("最近", 1), ("近期", 1)],
+        "player_stats_summary": [("统计", 3), ("数据", 2), ("总览", 3), ("概况", 3), ("信息", 1)],
+        "player_elo_trend": [("elo", 4), ("分数", 3), ("趋势", 4), ("变化", 3), ("排名", 1)],
+        "map_leaderboard": [("排行", 4), ("排名", 3), ("最好", 3), ("最强", 3), ("第一", 4), ("榜单", 4)],
+        "recent_battles": [("战斗", 3), ("对局", 3), ("比赛", 2), ("交战", 3)],
+        "weapon_analysis": [("武器", 4), ("装备", 2), ("导弹", 3), ("枪", 2)],
+        "player_comparison": [("对比", 4), ("比较", 4), ("vs", 4)],
+        "battle_report": [("战报", 5), ("总结", 3), ("报告", 2), ("战况", 5), ("复盘", 4)],
+        "activity_analysis": [("活跃", 5), ("在线", 3), ("参与", 3)],
+        "combat_style": [("风格", 4), ("打法", 4), ("特点", 3), ("习惯", 3)],
     }
     
     # 地图类型关键词
@@ -51,6 +59,17 @@ class IntentDetector:
         "BVR": ["bvr", "超视距", "远程"],
         "BFM": ["bfm", "格斗", "近战", "狗斗"],
         "PVE": ["pve", "ai", "电脑"],
+    }
+    IGNORED_PLAYER_TOKENS = {
+        "ai",
+        "bfm",
+        "bvr",
+        "elo",
+        "kd",
+        "kda",
+        "pve",
+        "sql",
+        "vs",
     }
     
     def detect(self, query: str) -> Dict[str, Any]:
@@ -87,9 +106,12 @@ class IntentDetector:
     
     def _detect_intent_type(self, query: str) -> str:
         """检测意图类型"""
+        if "战况" in query or ("总结" in query and ("这局" in query or "最近" in query)):
+            return "battle_report"
+
         scores = {}
         for intent, keywords in self.KEYWORDS.items():
-            score = sum(1 for keyword in keywords if keyword in query)
+            score = sum(weight for keyword, weight in keywords if keyword in query)
             if score > 0:
                 scores[intent] = score
         
@@ -99,9 +121,25 @@ class IntentDetector:
     
     def _extract_player_names(self, query: str) -> List[str]:
         """提取玩家名称（简单实现）"""
-        # 这里可以改进为更智能的NER
-        # 暂时返回空，由SQL生成器处理
-        return []
+        candidates = []
+
+        quoted_names = re.findall(r'["“](.+?)["”]', query)
+        candidates.extend(quoted_names)
+
+        explicit_player = re.findall(r'玩家[:：]?\s*([^\s，。！？,]{1,20})', query)
+        candidates.extend(explicit_player)
+
+        latin_tokens = re.findall(r'[A-Za-z][A-Za-z0-9_\-]{1,31}', query)
+        for token in latin_tokens:
+            if token.casefold() not in self.IGNORED_PLAYER_TOKENS:
+                candidates.append(token)
+
+        unique_candidates = []
+        for candidate in candidates:
+            normalized = candidate.strip()
+            if normalized and normalized not in unique_candidates:
+                unique_candidates.append(normalized)
+        return unique_candidates
     
     def _extract_map_type(self, query: str) -> Optional[str]:
         """提取地图类型"""
@@ -116,6 +154,8 @@ class IntentDetector:
             return "today"
         elif "昨天" in query:
             return "yesterday"
+        elif "最近一周" in query or "近一周" in query or "最近7天" in query:
+            return "this_week"
         elif "本周" in query or "这周" in query:
             return "this_week"
         elif "上周" in query:
@@ -140,6 +180,9 @@ class SQLGenerator:
         self.db_path = db_path
     
     def generate(self, intent: Dict[str, Any]) -> str:
+        return self.generate_plan(intent).sql
+
+    def generate_plan(self, intent: Dict[str, Any]) -> QueryPlan:
         """
         根据意图生成SQL查询
         :param intent: 意图字典
@@ -163,13 +206,98 @@ class SQLGenerator:
         
         generator = generators.get(intent_type, self._gen_stats_summary)
         return generator(intent)
+
+    def _build_filter_clauses(
+        self,
+        intent: Dict[str, Any],
+        *,
+        player_expr: str,
+        player_id_expr: str,
+        event_type_expr: Optional[str],
+        time_expr: str,
+        time_format: str = "%Y%m%d_%H%M%S",
+    ) -> Tuple[List[str], List[Any]]:
+        clauses: List[str] = []
+        params: List[Any] = []
+
+        players = intent.get("players", [])
+        if players:
+            player_clauses = []
+            for player in players:
+                player_clauses.append(
+                    f"(LOWER({player_expr}) LIKE LOWER(?) OR EXISTS ("
+                    f"SELECT 1 FROM player_names pn WHERE pn.player_id = {player_id_expr} AND LOWER(pn.name) LIKE LOWER(?)"
+                    f"))"
+                )
+                pattern = f"%{player}%"
+                params.extend([pattern, pattern])
+            clauses.append("(" + " OR ".join(player_clauses) + ")")
+
+        map_type = intent.get("map_type")
+        if map_type and event_type_expr:
+            clauses.append(f"{event_type_expr} LIKE ?")
+            params.append(f"{map_type.upper()}_%")
+
+        time_clauses, time_params = self._build_time_filters(intent.get("time_range"), time_expr, time_format)
+        clauses.extend(time_clauses)
+        params.extend(time_params)
+        return clauses, params
+
+    def _build_time_filters(
+        self,
+        time_range: Optional[str],
+        time_expr: str,
+        time_format: str,
+    ) -> Tuple[List[str], List[str]]:
+        if not time_range:
+            return [], []
+
+        now = datetime.now()
+        today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        clauses: List[str] = []
+        params: List[str] = []
+
+        if time_range == "today":
+            clauses.append(f"{time_expr} >= ?")
+            params.append(today_start.strftime(time_format))
+        elif time_range == "yesterday":
+            yesterday_start = today_start - timedelta(days=1)
+            clauses.extend([f"{time_expr} >= ?", f"{time_expr} < ?"])
+            params.extend([
+                yesterday_start.strftime(time_format),
+                today_start.strftime(time_format),
+            ])
+        elif time_range == "this_week":
+            week_start = today_start - timedelta(days=today_start.weekday())
+            clauses.append(f"{time_expr} >= ?")
+            params.append(week_start.strftime(time_format))
+        elif time_range == "last_week":
+            this_week_start = today_start - timedelta(days=today_start.weekday())
+            last_week_start = this_week_start - timedelta(days=7)
+            clauses.extend([f"{time_expr} >= ?", f"{time_expr} < ?"])
+            params.extend([
+                last_week_start.strftime(time_format),
+                this_week_start.strftime(time_format),
+            ])
+        elif time_range == "this_month":
+            month_start = today_start.replace(day=1)
+            clauses.append(f"{time_expr} >= ?")
+            params.append(month_start.strftime(time_format))
+
+        return clauses, params
+
+    def _compose_query(self, base_sql: str, clauses: List[str], order_and_limit_sql: str, params: List[Any]) -> QueryPlan:
+        sql = base_sql
+        if clauses:
+            sql += "\nWHERE " + "\n  AND ".join(clauses)
+        sql += "\n" + order_and_limit_sql.strip() + "\n"
+        return QueryPlan(sql=sql, params=params)
     
-    def _gen_recent_performance(self, intent: Dict) -> str:
+    def _gen_recent_performance(self, intent: Dict) -> QueryPlan:
         """生成最近表现查询"""
         limit = intent.get("limit", 20)
-        map_type = intent.get("map_type")
         
-        sql = """
+        base_sql = """
         SELECT 
             p.steam_name,
             r.map_name,
@@ -186,25 +314,26 @@ class SQLGenerator:
         JOIN replays r ON e.replay_id = r.id
         JOIN players p ON pe.player_id = p.id
         LEFT JOIN player_elo_history eh ON eh.event_id = e.id AND eh.player_id = p.id
-        WHERE 1=1
         """
-        
-        # 添加地图类型过滤（需要在replays表中添加map_type字段）
-        # if map_type:
-        #     sql += f" AND r.map_type = '{map_type}'"
-        
-        sql += f"""
-        ORDER BY r.played_at DESC
-        LIMIT {limit}
-        """
-        
-        return sql
+        clauses, params = self._build_filter_clauses(
+            intent,
+            player_expr="p.steam_name",
+            player_id_expr="p.id",
+            event_type_expr="e.event_type",
+            time_expr="r.played_at",
+        )
+        return self._compose_query(
+            base_sql,
+            clauses,
+            f"ORDER BY r.played_at DESC, e.time_local DESC\nLIMIT {limit}",
+            params,
+        )
     
-    def _gen_stats_summary(self, intent: Dict) -> str:
+    def _gen_stats_summary(self, intent: Dict) -> QueryPlan:
         """生成统计摘要查询"""
         limit = intent.get("limit", 20)
         
-        sql = """
+        base_sql = """
         SELECT 
             p.id,
             p.steam_name,
@@ -219,18 +348,26 @@ class SQLGenerator:
         LEFT JOIN player_events pe ON p.id = pe.player_id
         LEFT JOIN events e ON pe.event_id = e.id
         LEFT JOIN replays r ON e.replay_id = r.id
-        GROUP BY p.id
-        ORDER BY p.current_elo_BVR DESC
-        LIMIT {limit}
         """
-        
-        return sql
+        clauses, params = self._build_filter_clauses(
+            intent,
+            player_expr="p.steam_name",
+            player_id_expr="p.id",
+            event_type_expr="e.event_type",
+            time_expr="r.played_at",
+        )
+        return self._compose_query(
+            base_sql,
+            clauses,
+            f"GROUP BY p.id\nORDER BY p.current_elo_BVR DESC\nLIMIT {limit}",
+            params,
+        )
     
-    def _gen_elo_trend(self, intent: Dict) -> str:
+    def _gen_elo_trend(self, intent: Dict) -> QueryPlan:
         """生成Elo趋势查询"""
         limit = intent.get("limit", 50)
         
-        sql = f"""
+        base_sql = """
         SELECT 
             p.steam_name,
             eh.at_time,
@@ -243,19 +380,29 @@ class SQLGenerator:
         JOIN players p ON eh.player_id = p.id
         LEFT JOIN events e ON eh.event_id = e.id
         LEFT JOIN replays r ON r.id = COALESCE(eh.replay_id, e.replay_id)
-        ORDER BY eh.at_time DESC
-        LIMIT {limit}
         """
-        
-        return sql
+        clauses, params = self._build_filter_clauses(
+            intent,
+            player_expr="p.steam_name",
+            player_id_expr="p.id",
+            event_type_expr="e.event_type",
+            time_expr="eh.at_time",
+            time_format="%Y-%m-%d %H:%M:%S",
+        )
+        return self._compose_query(
+            base_sql,
+            clauses,
+            f"ORDER BY eh.at_time DESC\nLIMIT {limit}",
+            params,
+        )
     
-    def _gen_leaderboard(self, intent: Dict) -> str:
+    def _gen_leaderboard(self, intent: Dict) -> QueryPlan:
         """生成排行榜查询"""
         limit = intent.get("limit", 10)
         map_type = (intent.get("map_type") or "BVR").upper()
         elo_field = ELO_TYPE.get(map_type, ELO_TYPE["BVR"])
         
-        sql = f"""
+        base_sql = f"""
         SELECT 
             p.steam_name,
             p.{elo_field} as elo,
@@ -269,19 +416,28 @@ class SQLGenerator:
         FROM players p
         LEFT JOIN player_events pe ON p.id = pe.player_id
         LEFT JOIN events e ON pe.event_id = e.id
-        WHERE p.is_archived = 0
-        GROUP BY p.id
-        ORDER BY p.{elo_field} DESC
-        LIMIT {limit}
+        LEFT JOIN replays r ON e.replay_id = r.id
         """
-        
-        return sql
+        clauses, params = self._build_filter_clauses(
+            intent,
+            player_expr="p.steam_name",
+            player_id_expr="p.id",
+            event_type_expr="e.event_type",
+            time_expr="r.played_at",
+        )
+        clauses.insert(0, "p.is_archived = 0")
+        return self._compose_query(
+            base_sql,
+            clauses,
+            f"GROUP BY p.id\nORDER BY p.{elo_field} DESC\nLIMIT {limit}",
+            params,
+        )
     
-    def _gen_recent_battles(self, intent: Dict) -> str:
+    def _gen_recent_battles(self, intent: Dict) -> QueryPlan:
         """生成最近战斗查询"""
         limit = intent.get("limit", 10)
         
-        sql = f"""
+        base_sql = """
         SELECT 
             r.id as replay_id,
             r.map_name,
@@ -293,18 +449,26 @@ class SQLGenerator:
         LEFT JOIN events e ON r.id = e.replay_id
         LEFT JOIN player_events pe ON e.id = pe.event_id
         LEFT JOIN players p ON pe.player_id = p.id
-        GROUP BY r.id
-        ORDER BY r.played_at DESC
-        LIMIT {limit}
         """
-        
-        return sql
+        clauses, params = self._build_filter_clauses(
+            intent,
+            player_expr="p.steam_name",
+            player_id_expr="p.id",
+            event_type_expr="e.event_type",
+            time_expr="r.played_at",
+        )
+        return self._compose_query(
+            base_sql,
+            clauses,
+            f"GROUP BY r.id\nORDER BY r.played_at DESC\nLIMIT {limit}",
+            params,
+        )
     
-    def _gen_weapon_analysis(self, intent: Dict) -> str:
+    def _gen_weapon_analysis(self, intent: Dict) -> QueryPlan:
         """生成武器分析查询"""
         limit = intent.get("limit", 20)
         
-        sql = f"""
+        base_sql = """
         SELECT 
             e.weapon,
             COUNT(*) as usage_count,
@@ -313,23 +477,55 @@ class SQLGenerator:
             AVG(eh.elo_after - eh.elo_before) as avg_elo_change
         FROM events e
         JOIN player_events pe ON e.id = pe.event_id AND pe.role = 'killer'
+        JOIN players p ON pe.player_id = p.id
+        JOIN replays r ON e.replay_id = r.id
         LEFT JOIN player_elo_history eh ON e.id = eh.event_id AND pe.player_id = eh.player_id
-        WHERE e.weapon IS NOT NULL AND e.weapon != ''
-        GROUP BY e.weapon, e.kill_type
-        ORDER BY usage_count DESC
-        LIMIT {limit}
         """
-        
-        return sql
+        clauses, params = self._build_filter_clauses(
+            intent,
+            player_expr="p.steam_name",
+            player_id_expr="p.id",
+            event_type_expr="e.event_type",
+            time_expr="r.played_at",
+        )
+        clauses.insert(0, "e.weapon IS NOT NULL AND e.weapon != ''")
+        return self._compose_query(
+            base_sql,
+            clauses,
+            f"GROUP BY e.weapon, e.kill_type\nORDER BY usage_count DESC\nLIMIT {limit}",
+            params,
+        )
     
-    def _gen_player_comparison(self, intent: Dict) -> str:
+    def _gen_player_comparison(self, intent: Dict) -> QueryPlan:
         """生成玩家对比查询"""
         # 这个需要特殊处理，暂时返回基础统计
         return self._gen_stats_summary(intent)
     
-    def _gen_battle_report(self, intent: Dict) -> str:
+    def _gen_battle_report(self, intent: Dict) -> QueryPlan:
         """生成战报查询"""
-        sql = """
+        clauses, params = self._build_filter_clauses(
+            intent,
+            player_expr="p.steam_name",
+            player_id_expr="p.id",
+            event_type_expr="e.event_type",
+            time_expr="r.played_at",
+        )
+        where_sql = ""
+        if clauses:
+            where_sql = "WHERE " + " AND ".join(clauses)
+
+        sql = f"""
+        WITH latest_replay AS (
+            SELECT r.id
+            FROM replays r
+            JOIN events e ON r.id = e.replay_id
+            LEFT JOIN player_events pe ON e.id = pe.event_id
+            LEFT JOIN players p ON pe.player_id = p.id
+            {where_sql}
+            GROUP BY r.id
+            ORDER BY r.played_at DESC
+            LIMIT 1
+        )
         SELECT 
             r.id,
             r.map_name,
@@ -341,28 +537,27 @@ class SQLGenerator:
             e.weapon,
             e.kill_type,
             ed.details
-        FROM replays r
+        FROM latest_replay lr
+        JOIN replays r ON lr.id = r.id
         JOIN events e ON r.id = e.replay_id
         LEFT JOIN player_events pe_killer ON e.id = pe_killer.event_id AND pe_killer.role = 'killer'
         LEFT JOIN player_events pe_victim ON e.id = pe_victim.event_id AND pe_victim.role = 'victim'
         LEFT JOIN players p_killer ON pe_killer.player_id = p_killer.id
         LEFT JOIN players p_victim ON pe_victim.player_id = p_victim.id
         LEFT JOIN event_details ed ON e.id = ed.event_id
-        ORDER BY r.played_at DESC, e.time_local ASC
-        LIMIT 1
+        ORDER BY e.time_local ASC
         """
-        
-        return sql
+        return QueryPlan(sql=sql, params=params)
     
-    def _gen_activity_analysis(self, intent: Dict) -> str:
+    def _gen_activity_analysis(self, intent: Dict) -> QueryPlan:
         """生成活跃度分析查询"""
         limit = intent.get("limit", 10)
         
-        sql = f"""
+        base_sql = """
         SELECT 
             p.steam_name,
             COUNT(DISTINCT r.id) as matches_played,
-            COUNT(DISTINCT DATE(r.played_at)) as active_days,
+            COUNT(DISTINCT substr(r.played_at, 1, 8)) as active_days,
             MIN(r.played_at) as first_match,
             MAX(r.played_at) as last_match,
             COUNT(DISTINCT e.id) as total_events
@@ -370,16 +565,24 @@ class SQLGenerator:
         JOIN player_events pe ON p.id = pe.player_id
         JOIN events e ON pe.event_id = e.id
         JOIN replays r ON e.replay_id = r.id
-        GROUP BY p.id
-        ORDER BY matches_played DESC
-        LIMIT {limit}
         """
-        
-        return sql
+        clauses, params = self._build_filter_clauses(
+            intent,
+            player_expr="p.steam_name",
+            player_id_expr="p.id",
+            event_type_expr="e.event_type",
+            time_expr="r.played_at",
+        )
+        return self._compose_query(
+            base_sql,
+            clauses,
+            f"GROUP BY p.id\nORDER BY matches_played DESC\nLIMIT {limit}",
+            params,
+        )
     
-    def _gen_combat_style(self, intent: Dict) -> str:
+    def _gen_combat_style(self, intent: Dict) -> QueryPlan:
         """生成战斗风格分析查询"""
-        sql = """
+        base_sql = """
         SELECT 
             p.steam_name,
             e.weapon,
@@ -392,12 +595,20 @@ class SQLGenerator:
         JOIN events e ON pe.event_id = e.id
         JOIN replays r ON e.replay_id = r.id
         LEFT JOIN player_elo_history eh ON e.id = eh.event_id AND p.id = eh.player_id
-        GROUP BY p.id, e.weapon, e.kill_type
-        ORDER BY weapon_usage DESC
-        LIMIT 50
         """
-        
-        return sql
+        clauses, params = self._build_filter_clauses(
+            intent,
+            player_expr="p.steam_name",
+            player_id_expr="p.id",
+            event_type_expr="e.event_type",
+            time_expr="r.played_at",
+        )
+        return self._compose_query(
+            base_sql,
+            clauses,
+            "GROUP BY p.id, e.weapon, e.kill_type\nORDER BY weapon_usage DESC\nLIMIT 50",
+            params,
+        )
 
 
 class RAGExecutor:
@@ -405,8 +616,127 @@ class RAGExecutor:
     
     def __init__(self, db_path=FLIGHTLOG_DB_PATH):
         self.db_path = db_path
+
+    def _get_final_query_keyword(self, sql: str) -> Optional[str]:
+        sql_lower = sql.lower()
+        length = len(sql_lower)
+        i = 0
+
+        def skip_ws_and_comments(index: int) -> int:
+            while index < length:
+                if sql_lower[index].isspace():
+                    index += 1
+                    continue
+                if sql_lower.startswith("--", index):
+                    newline = sql_lower.find("\n", index)
+                    return length if newline == -1 else newline + 1
+                if sql_lower.startswith("/*", index):
+                    end = sql_lower.find("*/", index + 2)
+                    return length if end == -1 else end + 2
+                break
+            return index
+
+        def read_word(index: int) -> Tuple[Optional[str], int]:
+            index = skip_ws_and_comments(index)
+            start = index
+            while index < length and (sql_lower[index].isalnum() or sql_lower[index] == "_"):
+                index += 1
+            if start == index:
+                return None, index
+            return sql_lower[start:index], index
+
+        i = skip_ws_and_comments(i)
+        first_word, i = read_word(i)
+        if first_word != "with":
+            return first_word
+
+        maybe_recursive, next_index = read_word(i)
+        if maybe_recursive == "recursive":
+            i = next_index
+
+        def skip_balanced_parentheses(index: int) -> Optional[int]:
+            index = skip_ws_and_comments(index)
+            if index >= length or sql_lower[index] != "(":
+                return None
+
+            depth = 0
+            in_single = False
+            in_double = False
+            while index < length:
+                ch = sql_lower[index]
+                if in_single:
+                    if ch == "'" and not sql_lower.startswith("''", index):
+                        in_single = False
+                    elif sql_lower.startswith("''", index):
+                        index += 1
+                    index += 1
+                    continue
+                if in_double:
+                    if ch == '"' and not sql_lower.startswith('""', index):
+                        in_double = False
+                    elif sql_lower.startswith('""', index):
+                        index += 1
+                    index += 1
+                    continue
+                if sql_lower.startswith("--", index):
+                    newline = sql_lower.find("\n", index)
+                    if newline == -1:
+                        return None
+                    index = newline + 1
+                    continue
+                if sql_lower.startswith("/*", index):
+                    end = sql_lower.find("*/", index + 2)
+                    if end == -1:
+                        return None
+                    index = end + 2
+                    continue
+                if ch == "'":
+                    in_single = True
+                    index += 1
+                    continue
+                if ch == '"':
+                    in_double = True
+                    index += 1
+                    continue
+                if ch == "(":
+                    depth += 1
+                elif ch == ")":
+                    depth -= 1
+                    if depth == 0:
+                        return index + 1
+                index += 1
+            return None
+
+        while i < length:
+            cte_name, i = read_word(i)
+            if not cte_name:
+                return None
+
+            i = skip_ws_and_comments(i)
+            if i < length and sql_lower[i] == "(":
+                i = skip_balanced_parentheses(i)
+                if i is None:
+                    return None
+
+            as_keyword, i = read_word(i)
+            if as_keyword != "as":
+                return None
+
+            i = skip_balanced_parentheses(i)
+            if i is None:
+                return None
+
+            i = skip_ws_and_comments(i)
+            if i < length and sql_lower[i] == ",":
+                i += 1
+                continue
+
+            final_keyword, _ = read_word(i)
+            return final_keyword
+
+        return None
     
-    def execute(self, sql: str) -> Tuple[List[Dict], List[str]]:
+    def execute(self, sql: str, params: Optional[List[Any]] = None) -> Tuple[List[Dict], List[str]]:
         """
         执行SQL查询
         :param sql: SQL查询字符串
@@ -414,7 +744,8 @@ class RAGExecutor:
         """
         sql_to_run = sql.strip()
         # 只允许只读查询，避免执行非 SELECT 语句
-        if not sql_to_run.lower().startswith("select"):
+        final_keyword = self._get_final_query_keyword(sql_to_run)
+        if final_keyword != "select":
             print(f"[ERROR] 仅允许执行SELECT查询，收到: {sql_to_run[:50]}...")
             return [], []
 
@@ -423,7 +754,7 @@ class RAGExecutor:
         cur = conn.cursor()
         
         try:
-            cur.execute(sql)
+            cur.execute(sql, params or [])
             rows = cur.fetchall()
             
             if not rows:
@@ -492,11 +823,11 @@ class RAGSystem:
         print(f"[RAG] 检测到意图: {intent}")
         
         # 2. 生成SQL
-        sql = self.sql_generator.generate(intent)
-        print(f"[RAG] 生成SQL: {sql[:100]}...")
+        query_plan = self.sql_generator.generate_plan(intent)
+        print(f"[RAG] 生成SQL: {query_plan.sql[:100]}...")
         
         # 3. 执行SQL
-        data, columns = self.rag_executor.execute(sql)
+        data, columns = self.rag_executor.execute(query_plan.sql, query_plan.params)
         print(f"[RAG] 查询到 {len(data)} 条记录")
         
         # 4. 格式化为LLM上下文
@@ -504,7 +835,8 @@ class RAGSystem:
         
         return {
             "intent": intent,
-            "sql": sql,
+            "sql": query_plan.sql,
+            "params": query_plan.params,
             "data": data,
             "columns": columns,
             "llm_context": llm_context,

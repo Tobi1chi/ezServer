@@ -7,7 +7,7 @@ import sys
 from pathlib import Path
 import sqlite3
 import json
-from typing import Optional, Dict, List, Union
+from typing import Optional, Dict, List, Tuple
 import asyncio
 import time
 import requests
@@ -32,35 +32,83 @@ class PlayerStatsService:
     def __init__(self, db_path=FLIGHTLOG_DB_PATH):
         self.db = flightlogDB(db_path)
     
-    def get_player_by_name(self, player_name: str) -> Optional[Dict]:
-        """
-        通过玩家名称查找玩家
-        :param player_name: 玩家名称
-        :return: 玩家信息字典或None
-        """
+    def _load_all_players_with_names(self) -> List[Dict]:
         conn = self.db.get_conn()
         conn.row_factory = sqlite3.Row
         cur = conn.cursor()
         
         try:
-            # 在player_names表中搜索包含该名称的记录
             cur.execute("""
-                SELECT p.*, pn.name as name_history
+                SELECT p.*, pn.name AS name_history
                 FROM players p
-                JOIN player_names pn ON p.id = pn.player_id
-                WHERE pn.name LIKE ?
-            """, (f'%{player_name}%',))
-            
-            row = cur.fetchone()
-            if row:
+                LEFT JOIN player_names pn ON p.id = pn.player_id
+                WHERE p.is_archived = 0
+            """)
+
+            players = []
+            for row in cur.fetchall():
                 result = dict(row)
-                # 解析name_history JSON
-                if result.get('name_history'):
-                    result['name_history'] = json.loads(result['name_history'])
-                return result
-            return None
+                raw_history = result.get("name_history")
+                if raw_history:
+                    try:
+                        result["name_history"] = json.loads(raw_history)
+                    except json.JSONDecodeError:
+                        result["name_history"] = []
+                else:
+                    result["name_history"] = []
+                players.append(result)
+            return players
         finally:
             conn.close()
+
+    def _score_name_match(self, query: str, player: Dict) -> Tuple[Optional[int], Optional[str]]:
+        query_norm = query.strip().casefold()
+        names = [player.get("steam_name", ""), *player.get("name_history", [])]
+
+        best_score = None
+        best_name = None
+        for name in names:
+            candidate = (name or "").strip()
+            if not candidate:
+                continue
+            candidate_norm = candidate.casefold()
+            if candidate_norm == query_norm:
+                score = 0
+            elif candidate_norm.startswith(query_norm):
+                score = 1
+            elif query_norm in candidate_norm:
+                score = 2
+            else:
+                continue
+
+            if best_score is None or score < best_score or (score == best_score and len(candidate) < len(best_name or candidate)):
+                best_score = score
+                best_name = candidate
+
+        return best_score, best_name
+
+    def resolve_player_by_name(self, player_name: str) -> Tuple[Optional[Dict], Optional[str]]:
+        """
+        通过玩家名称查找玩家。
+        优先精确匹配，其次前缀匹配，再次子串匹配；如果最佳结果不唯一，则返回歧义提示。
+        """
+        candidates = []
+        for player in self._load_all_players_with_names():
+            score, matched_name = self._score_name_match(player_name, player)
+            if score is not None:
+                candidates.append((score, matched_name or "", player))
+
+        if not candidates:
+            return None, None
+
+        candidates.sort(key=lambda item: (item[0], len(item[1]), item[2]["steam_name"].casefold()))
+        best_score = candidates[0][0]
+        best_group = [item for item in candidates if item[0] == best_score]
+        if len(best_group) > 1:
+            preview = " / ".join(item[2]["steam_name"] for item in best_group[:5])
+            return None, f"匹配到多个玩家：{preview}，请改用更完整的名称或 Steam ID。"
+
+        return best_group[0][2], None
     
     def get_player_by_steam_id(self, steam_id: str) -> Optional[Dict]:
         """
@@ -308,8 +356,14 @@ class BotCommands(commands.Cog):
                     )
                     return
                 else:
-                    player_info = self.stats_service.get_player_by_name(name)
+                    player_info, name_error = self.stats_service.resolve_player_by_name(name)
                     query_value = name
+                    if name_error:
+                        await interaction.followup.send(
+                            f"❌ {name_error}",
+                            ephemeral=True
+                        )
+                        return
             elif steam_id is not None:
                 player_info = self.stats_service.get_player_by_steam_id(steam_id)
                 query_value = steam_id
@@ -329,8 +383,8 @@ class BotCommands(commands.Cog):
             
             # 获取玩家事件和ELO历史
             player_id = player_info['id']
-            events = self.stats_service.get_player_events(player_id, limit=20)
-            elo_history = self.stats_service.get_player_elo_history(player_id, limit=20)
+            events = self.stats_service.get_player_events(player_id, limit=MAX_DISPLAY_RECORDS)
+            elo_history = self.stats_service.get_player_elo_history(player_id, limit=MAX_DISPLAY_RECORDS)
             
             # 生成统计信息Embed
             embed = self.stats_service.format_player_stats(player_info, events, elo_history)
@@ -522,6 +576,29 @@ class BotCommands(commands.Cog):
             result += f"... 还有 {len(data) - 10} 条记录未显示\n"
         
         return result
+
+    def _build_chat_response_embed(self, message: str, ai_response: str) -> discord.Embed:
+        embed = discord.Embed(
+            title="🤖 AI助手",
+            color=discord.Color.green()
+        )
+        embed.add_field(
+            name="💬 你的消息",
+            value=message[:1024],
+            inline=False
+        )
+
+        response_chunks = self._split_text(ai_response, 1024)
+        for index, chunk in enumerate(response_chunks[:5], start=1):
+            field_name = "🔮 AI回复" if index == 1 else f"🔮 AI回复 (续{index - 1})"
+            embed.add_field(
+                name=field_name,
+                value=chunk,
+                inline=False
+            )
+
+        embed.set_footer(text=f"对话轮数: {(len(self.chat_messages) - 1) // 2} | 3分钟无活动将自动结束")
+        return embed
     
     @app_commands.command(name="chatwithai", description="与AI聊天")
     @app_commands.describe(
@@ -593,31 +670,7 @@ class BotCommands(commands.Cog):
                             "role": "assistant",
                             "content": ai_response
                         })
-                        
-                        # create response embed
-                        embed = discord.Embed(
-                            title="🤖 AI助手",
-                            color=discord.Color.green()
-                        )
-                        embed.add_field(
-                            name="💬 你的消息",
-                            value=message[:1024],  # discord field limit
-                            inline=False
-                        )
-                        if len(ai_response) > 1024:
-                            embed.add_field(
-                                name="🔮 AI回复",
-                                value=ai_response[:1024],  # discord field limit
-                                inline=False
-                            )
-                            embed.add_field(
-                                name="🔮 AI回复",
-                                value=ai_response[1024:2048],  # discord field limit
-                                inline=False
-                            )
-                        
-                        embed.set_footer(text=f"对话轮数: {(len(self.chat_messages) - 1) // 2} | 3分钟无活动将自动结束")
-                        
+                        embed = self._build_chat_response_embed(message, ai_response)
                         await interaction.followup.send(embed=embed)
                         print(f"[AI Chat] User {user_name}: {message[:50]}...")
                         print(f"[AI Chat] AI: {ai_response[:50]}...")
@@ -830,4 +883,3 @@ async def setup(bot: commands.Bot):
     """
     await bot.add_cog(BotCommands(bot))
     print("[Bot Commands] Commands loaded successfully!")
-

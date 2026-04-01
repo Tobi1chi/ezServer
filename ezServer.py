@@ -190,89 +190,125 @@ class EzServer:
                 self._pending_waiters.pop(waiter_id, None)
 
 
-    def wait_for_response(self, expected_src: Union[str, list], timeout: float = 5.0, consume: bool = True) -> list:    
+    def wait_for_response(self, expected_src: Union[str, list], timeout: float = 5.0, consume: bool = True, retry: int = 1) -> list:    
         """Wait for specific response type(s) from VTOL server. Raises ResponseTimeout on timeout."""
-        expected_set: Set[str]
-        if isinstance(expected_src, str):
-            expected_set = {expected_src}
-        else:
-            expected_set = set(expected_src)
+        def single_wait_for_response(expected_src: Union[str, list], timeout: float = 5.0, consume: bool = True) -> list:
+            expected_set: Set[str]
+            if isinstance(expected_src, str):
+                expected_set = {expected_src}
+            else:
+                expected_set = set(expected_src)
 
-        if not expected_set:
-            raise ValueError('expected_src cannot be empty')
+            if not expected_set:
+                raise ValueError('expected_src cannot be empty')
 
-        waiter_id = None
-        waiter: Union[PendingWaiter, None] = None
-        timeout_at = time.time() + timeout
+            waiter_id = None
+            waiter: Union[PendingWaiter, None] = None
+            timeout_at = time.time() + timeout
 
-        with self._waiter_lock:
-            # Reuse waiter reserved by send_and_wait (if present) so we do not miss fast responses
-            override_id = getattr(_waiter_tls, 'waiter_id', None)
-            if override_id is not None:
-                setattr(_waiter_tls, 'waiter_id', None)
-            if override_id:
-                waiter = self._pending_waiters.get(override_id)
-                if waiter:
-                    waiter.expected_src = expected_set
-                    waiter.consume = consume
-                    waiter.timeout_at = timeout_at
-                    waiter_id = override_id
-
-            if waiter is None:
-                waiter_id = f"waiter_{time.time()}_{id(self)}"
-                waiter = PendingWaiter(
-                    expected_src=expected_set,
-                    timeout_at=timeout_at,
-                    consume=consume,
-                )
-                self._pending_waiters[waiter_id] = waiter
-
-        try:
-            if not self.connected:
-                raise ConnectionError('服务器已断开连接, 无法等待响应')
-            event_signaled = waiter.event.wait(timeout)
-            if not self.connected:
-                raise ConnectionError('服务器已断开连接, 等待过程中断开')
-            if event_signaled and waiter.messages:
-                messages = list(waiter.messages)
-                waiter.messages.clear()
-                return messages
-            raise ResponseTimeout(f"No response for {expected_set} after {timeout}s")
-        finally:
             with self._waiter_lock:
-                self._pending_waiters.pop(waiter_id, None)
-
-
-    def send_and_wait(self, command: str, expected_src: Union[str, list], timeout: float = 5.0) -> list:
-        """Send command and wait for response (atomic operation). Prevents race conditions."""
-        expected_set: Set[str]
-        if isinstance(expected_src, str):
-            expected_set = {expected_src}
-        else:
-            expected_set = set(expected_src)
-        if not expected_set:
-            raise ValueError('expected_src cannot be empty')
-
-        waiter_id = f"waiter_{time.time()}_{id(self)}"
-        waiter = PendingWaiter(
-            expected_src=expected_set,
-            timeout_at=time.time() + timeout,
-            consume=True,
-        )
-
-        with self._waiter_lock:
-            # Register waiter under this thread so wait_for_response picks it up before routing completes
-            self._pending_waiters[waiter_id] = waiter
-            setattr(_waiter_tls, 'waiter_id', waiter_id)
-            self.send_message(command)
-
-        try:
-            return self.wait_for_response(expected_src, timeout)
-        finally:
-            with self._waiter_lock:
-                if getattr(_waiter_tls, 'waiter_id', None) == waiter_id:
+                # Reuse waiter reserved by send_and_wait (if present) so we do not miss fast responses
+                override_id = getattr(_waiter_tls, 'waiter_id', None)
+                if override_id is not None:
                     setattr(_waiter_tls, 'waiter_id', None)
-                self._pending_waiters.pop(waiter_id, None)
+                if override_id:
+                    waiter = self._pending_waiters.get(override_id)
+                    if waiter:
+                        waiter.expected_src = expected_set
+                        waiter.consume = consume
+                        waiter.timeout_at = timeout_at
+                        waiter_id = override_id
+
+                if waiter is None:
+                    waiter_id = f"waiter_{time.time()}_{id(self)}"
+                    waiter = PendingWaiter(
+                        expected_src=expected_set,
+                        timeout_at=timeout_at,
+                        consume=consume,
+                    )
+                    self._pending_waiters[waiter_id] = waiter
+
+            try:
+                if not self.connected:
+                    raise ConnectionError('服务器已断开连接, 无法等待响应')
+                event_signaled = waiter.event.wait(timeout)
+                if not self.connected:
+                    raise ConnectionError('服务器已断开连接, 等待过程中断开')
+                if event_signaled and waiter.messages:
+                    messages = list(waiter.messages)
+                    waiter.messages.clear()
+                    return messages
+                raise ResponseTimeout(f"No response for {expected_set} after {timeout}s")
+            finally:
+                with self._waiter_lock:
+                    self._pending_waiters.pop(waiter_id, None)
+        
+        # 重试逻辑：只在 retry > 1 时生效
+        if retry < 1:
+            retry = 1
+        
+        for attempt in range(retry):
+            try:
+                return single_wait_for_response(expected_src, timeout, consume)
+            except ResponseTimeout as e:
+                if attempt < retry - 1:
+                    print(f'[WARN] 等待响应超时，准备第 {attempt + 2}/{retry} 次重试...')
+                    time.sleep(0.5)  # 短暂延迟后重试
+                else:
+                    # 最后一次尝试也失败，抛出异常
+                    raise
+
+    def send_and_wait(self, command: str, expected_src: Union[str, list], timeout: float = 5.0, retry: int = 3) -> list:
+        """Send command and wait for response with retry support (atomic operation). Prevents race conditions."""
+        expected_set: Set[str]
+        if isinstance(expected_src, str):
+            expected_set = {expected_src}
+        else:
+            expected_set = set(expected_src)
+        if not expected_set:
+            raise ValueError('expected_src cannot be empty')
+        
+        if retry < 1:
+            retry = 1
+        
+        for attempt in range(retry):
+            waiter_id = f"waiter_{time.time()}_{id(self)}_{attempt}"
+            waiter = PendingWaiter(
+                expected_src=expected_set,
+                timeout_at=time.time() + timeout,
+                consume=True,
+            )
+
+            with self._waiter_lock:
+                # Register waiter under this thread so wait_for_response picks it up before routing completes
+                self._pending_waiters[waiter_id] = waiter
+                setattr(_waiter_tls, 'waiter_id', waiter_id)
+                self.send_message(command)
+
+            try:
+                return self.wait_for_response(expected_src, timeout)
+            except ResponseTimeout as e:
+                # 清理当前尝试的 waiter
+                with self._waiter_lock:
+                    if getattr(_waiter_tls, 'waiter_id', None) == waiter_id:
+                        setattr(_waiter_tls, 'waiter_id', None)
+                    self._pending_waiters.pop(waiter_id, None)
+                
+                # 如果还有重试机会，等待一下再重试
+                if attempt < retry - 1:
+                    print(f'[WARN] 命令 "{command}" 等待响应超时，准备第 {attempt + 2}/{retry} 次重试...')
+                    time.sleep(0.5)  # 短暂延迟后重试
+                else:
+                    # 最后一次尝试也失败，抛出异常
+                    print(f'[ERROR] 命令 "{command}" 在 {retry} 次尝试后仍然超时')
+                    raise
+            except Exception as e:
+                # 其他异常立即清理并抛出
+                with self._waiter_lock:
+                    if getattr(_waiter_tls, 'waiter_id', None) == waiter_id:
+                        setattr(_waiter_tls, 'waiter_id', None)
+                    self._pending_waiters.pop(waiter_id, None)
+                raise
 
     def wait_lobby_period(self, seconds: int, on_complete: Callable) -> None:
         '''Start non-blocking lobby timer. Callback fires after duration.'''
@@ -384,6 +420,7 @@ class EzServer:
             "steam_id": steam_id,
             "in_game_elo": player_db.get(f"current_elo_{map_type}"),
             "ingame_elo_history": [],
+            "Teams": "Allied",
             "connected": True
         }
         self.online_players.append(player_dict)
@@ -405,62 +442,70 @@ class EzServer:
         if player_dict:
             player_dict["connected"] = False
                 # 名字用列表里的也可以，这里随你
-            print(f'[Event] Disconnected: {player_dict['playername']}')
+            print(f"[Event] Disconnected: {player_dict['playername']}")
             self._print_online_players()
             return True
         print(f'[ERROR] Player {playername} not found in online players')
         return False
+
+    def _find_online_player(self, playername: str) -> Union[dict, None]:
+        return next((p for p in self.online_players if p["playername"] == playername), None)
+
+    def _apply_ingame_elo_delta(self, player: dict, delta: float) -> float:
+        player["ingame_elo_history"].append(delta)
+        return player["in_game_elo"] + sum(player["ingame_elo_history"])
+
+    def _build_kill_event(
+        self,
+        killer_player: dict,
+        victim_player: dict,
+        victim_aircraft: str,
+        weapon: str,
+        delta: float,
+    ) -> dict:
+        new_event = self.global_event_history_template.copy()
+        new_event["event_type"] = f"{FSM_MAPS[self.current_state]['map_type']}_KILL"
+        new_event["datetime"] = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+        new_event["killer_id"] = killer_player["steam_id"]
+        new_event["killer_name"] = killer_player["playername"]
+        new_event["killer_aircraft"] = ""
+        new_event["victim_id"] = victim_player["steam_id"]
+        new_event["victim_name"] = victim_player["playername"]
+        new_event["victim_aircraft"] = victim_aircraft
+        new_event["weapon"] = weapon
+        new_event["elo_delta"] = delta
+        return new_event
         
     def _handle_kill_event(self, killer_name: str, aircraft: str, victim: str, weapon: str) -> bool:
         """Handle kill event and update ELO"""
         try:
+            killer_player = self._find_online_player(killer_name)
+            victim_player = self._find_online_player(victim)
+
+            missing_players = []
+            if killer_player is None:
+                missing_players.append(f'killer={killer_name}')
+            if victim_player is None:
+                missing_players.append(f'victim={victim}')
+            if missing_players:
+                print(f"[WARNING] Skip kill event because online player mapping is incomplete: {', '.join(missing_players)}")
+                return False
+
             delta = EloSystem.calculate_elo_change_from_log(
                 killer_name, aircraft, victim, weapon, FSM_MAPS[self.current_state]['map_type']
             )
             print(f'[Event] Kill Event: {killer_name} killed {aircraft} ({victim}) with {weapon}')
-            # Update player ELO
-            player_found_killer = False
-            player_found_victim = False
-            for player_killer in self.online_players:
-                if player_killer["playername"] == killer_name:
-                    killer_elo = player_killer["in_game_elo"]
-                    player_killer["ingame_elo_history"].append(delta)
-                    sum_elo_killer = sum(player_killer["ingame_elo_history"])
-                    player_found_killer = True
-                    break
-            
-            if not player_found_killer:
-                print(f'[WARNING] Killer {killer_name} not found in online players')
-            for player_victim in self.online_players:
-                if player_victim["playername"] == victim:
-                    victim_elo = player_victim["in_game_elo"]
-                    player_victim["ingame_elo_history"].append(-delta)
-                    sum_elo_victim = sum(player_victim["ingame_elo_history"])
-                    player_found_victim = True
-                    break
-            
-            if not player_found_victim:
-                print(f'[WARNING] Victim {victim} not found in online players')
-            
-            # Send log to server
-            log_msg_killer = f"ELO Change:{killer_name} +{delta}; New ELO: {sum_elo_killer+killer_elo}"
+            killer_new_elo = self._apply_ingame_elo_delta(killer_player, delta)
+            victim_new_elo = self._apply_ingame_elo_delta(victim_player, -delta)
+
+            log_msg_killer = f"ELO Change:{killer_name} +{delta}; New ELO: {killer_new_elo}"
             self.send_message(f"sendlog {log_msg_killer}")
-            log_msg_victim = f"ELO Change:{victim} -{delta}; New ELO: {sum_elo_victim+victim_elo}"
+            log_msg_victim = f"ELO Change:{victim} -{delta}; New ELO: {victim_new_elo}"
             self.send_message(f"sendlog {log_msg_victim}")
 
-            # Add event to global event history
-            new_event = self.global_event_history_template.copy()
-            new_event["event_type"] = f"{FSM_MAPS[self.current_state]['map_type']}_KILL"
-            new_event["datetime"] = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S") #same format as the sqlite3 datetime format
-            new_event["killer_id"] = next((p for p in self.online_players if p["playername"] == killer_name), None)["steam_id"]
-            new_event["killer_name"] = killer_name
-            new_event["killer_aircraft"] = ""
-            new_event["victim_id"] = next((p for p in self.online_players if p["playername"] == victim), None)["steam_id"]
-            new_event["victim_name"] = victim
-            new_event["victim_aircraft"] = aircraft
-            new_event["weapon"] = weapon
-            new_event["elo_delta"] = delta
-            self.global_event_history.append(new_event)
+            self.global_event_history.append(
+                self._build_kill_event(killer_player, victim_player, aircraft, weapon, delta)
+            )
 
             return True
             
@@ -493,18 +538,14 @@ AUTOSAVE_PATH = BASE_PATH / "Autosave 9"
 DEBUG = False
 RAND_MODE = False
 
-
+STATE = 'state'
 FSM_MAPS: dict = {
-    "state1": {"campaign_id":"2860956181", "mapname":"BVR Ethi5", "map_type":"BVR"},
-    "state2": {"campaign_id":"3355613749", "mapname":"MergeLarge", "map_type":"BFM"},
-    "state3": {"campaign_id":"2860956181", "mapname":"BVR Archipel", "map_type":"BVR"},
-    "state4": {"campaign_id":"2860956181", "mapname":"BVR Ocixem", "map_type":"BVR"},
-    "state5": {"campaign_id":"2860956181", "mapname":"BVR Crack", "map_type":"BVR"},
-    "state6": {"campaign_id":"2860956181", "mapname":"BVR afMtnsHills", "map_type":"BVR"},
-    "state7": {"campaign_id":"3583755382", "mapname":"Dragon's Valley", "map_type":"BVR"},
-    "state8": {"campaign_id":"3583755382", "mapname":"Fjord Coast", "map_type":"BVR"},
+    "state1": {"campaign_id":"3355613749", "mapname":"MergeLarge", "map_type":"BFM"},
+    "state2": {"campaign_id":"2860956181", "mapname":"BVR Archipel", "map_type":"BVR"},
+    "state3": {"campaign_id":"3583755382", "mapname":"Dragon's Valley", "map_type":"BVR"},
+    "state4": {"campaign_id":"3583755382", "mapname":"Fjord Coast", "map_type":"BVR"},
 }
-
+FSM_STATE_NUM = len(FSM_MAPS)
 def init_server(state:str):
     server.current_state = state #update current state
     server.send_message("sethost name " + SERVER_NAME)
@@ -535,114 +576,158 @@ def restart_server(state:str):
     server.current_state = state #update current state
     server.send_message(f"sethost campaign {FSM_MAPS[state]['campaign_id']}")
     server.send_message(f"sethost mission {FSM_MAPS[state]['mapname']}")
-    time.sleep(1) #看来是必须加这个延迟了，不然会偶发性有bug
+    time.sleep(5) #看来是必须加这个延迟了，不然会偶发性有bug
     server.send_and_wait("restart", "LobbyReady", timeout=60*3)
 
 
 def end_state(state:str):
-    online_players = server.online_players #save online players list to local variable
-    server.send_message("skip")
-    server.wait_for_response("SaveComplete", timeout=60) #wait for autosave complete
+    online_players = list(server.online_players)
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+
     try:
-        responses = server.send_and_wait("flightlog", "GetFlightLog", timeout=10)
-        raw = responses[0]
-    except ResponseTimeout:
-        print("没有收到 flightlog 响应,重新获取")
+        server.send_message("skip")
+        server.wait_for_response("SaveComplete", timeout=60)
+
+        raw = _request_flightlog()
+        if raw is None:
+            return
+
+        print("flightlog raw:", raw)
+        decoded = _decode_flightlog_response(raw)
+        if decoded is None:
+            return
+
+        msg = decoded.get("msg")
+        if msg is None:
+            print("flightlog 响应中没有 msg 字段:", decoded)
+            return
+
+        print("flightlog msg:")
+        for log in msg:
+            print(log)
+
+        msg_new = remove_adjacent_duplicates(msg)
+        msg_str = serialize_flightlog(msg_new)
+        with open(LOCAL_PATH/'Flightlog_Latest.json', "w", encoding='utf-8') as f:
+            f.write(msg_str)
+
+        archive_path = archive_match_bundle(state, timestamp, msg_str)
+        replay_info = build_replay_info(state, timestamp, archive_path)
+        if server.global_event_history:
+            save_ok = db_flightlog.save_global_event_history(server.global_event_history, replay_info, msg_new)
+            if save_ok:
+                db_flightlog.update_player_elo(online_players, FSM_MAPS[state]['map_type'])
+            else:
+                print("[ERROR] 跳过 Elo 落库更新，因为事件历史保存失败")
+    except Exception as e:
+        print(f"[ERROR] end_state failed for {state}: {e}")
+    finally:
+        server.global_event_history.clear()
+        server.online_players.clear()
+
+
+def remove_adjacent_duplicates(lst):
+    result = []
+    for x in lst:
+        if not result or result[-1] != x:
+            result.append(x)
+    return result
+
+
+def serialize_flightlog(flightlog_data) -> str:
+    if isinstance(flightlog_data, (list, dict)):
+        return json.dumps(flightlog_data, ensure_ascii=False, indent=2)
+    return str(flightlog_data)
+
+
+def _request_flightlog() -> Union[dict, None]:
+    for attempt in range(2):
         try:
             responses = server.send_and_wait("flightlog", "GetFlightLog", timeout=10)
-            raw = responses[0]
+            return responses[0]
         except ResponseTimeout:
-            print("没有收到 flightlog 响应")
-            raw = {}
+            if attempt == 0:
+                print("没有收到 flightlog 响应,重新获取")
+            else:
+                print("没有收到 flightlog 响应")
+    return None
 
-    print("flightlog raw:", raw)
 
+def _decode_flightlog_response(raw) -> Union[dict, None]:
     try:
-        if isinstance(raw, dict):
-            d = raw
-        else:
-            d = json.loads(raw)
-        src = d.get("src")
-        if not src or "GetFlightLog" not in src:
-            print("flightlog 响应中没有 GetFlightLog 字段:", d)
-            try:
-                responses = server.send_and_wait("flightlog", "GetFlightLog", timeout=10)
-                raw = responses[0]
-                print("flightlog raw:", raw)
-                if isinstance(raw, dict):
-                    d = raw
-                else:
-                    d = json.loads(raw)
-                src = d.get("src")
-                if not src or "GetFlightLog" not in src:
-                    print("flightlog 响应中没有 GetFlightLog 字段,退出")
-                    return
-            except ResponseTimeout:
-                print("flightlog 响应中没有 GetFlightLog 字段,退出")
-                return
+        decoded = raw if isinstance(raw, dict) else json.loads(raw)
     except json.JSONDecodeError as e:
         print("flightlog JSON 解析失败:", e)
-        return
+        return None
 
-    msg = d.get("msg")
-    if msg is None:
-        print("flightlog 响应中没有 msg 字段:", d)
-        return
-    print("flightlog msg:")
-    for log in msg:
-        print(log)
-    #remove adjacent duplicates
-    def remove_adjacent_duplicates(lst):
-        result = []
-        for x in lst:
-            if not result or result[-1] != x:
-                result.append(x)
-        return result
-    #washed flightlog
-    msg_new = remove_adjacent_duplicates(msg)
-    #save flightlog
-    if isinstance(msg_new, (list, dict)):
-        msg_str = json.dumps(msg_new, ensure_ascii=False, indent=2)
-    else:
-        msg_str = str(msg_new)
-    with open(LOCAL_PATH/'Flightlog_Latest.json', "w", encoding='utf-8') as f:
-        f.write(msg_str)
+    src = decoded.get("src")
+    if src and "GetFlightLog" in src:
+        return decoded
+
+    print("flightlog 响应中没有 GetFlightLog 字段:", decoded)
+    retry_raw = _request_flightlog()
+    if retry_raw is None:
+        print("flightlog 响应中没有 GetFlightLog 字段,退出")
+        return None
 
     try:
-        copy_folder(AUTOSAVE_PATH, LOCAL_PATH/"Replays"/f"{FSM_MAPS[state]['mapname']}_{timestamp}")
-        with open(LOCAL_PATH/"Replays"/f"{FSM_MAPS[state]['mapname']}_{timestamp}/flightlog.json", "w", encoding='utf-8') as f:
-            f.write(msg_str)
-        zip_folder(LOCAL_PATH/"Replays"/f"{FSM_MAPS[state]['mapname']}_{timestamp}", LOCAL_PATH/"Replays"/f"{FSM_MAPS[state]['mapname']}_{timestamp}")
-        delete_folder(LOCAL_PATH/"Replays"/f"{FSM_MAPS[state]['mapname']}_{timestamp}")
-        delete_folder(AUTOSAVE_PATH)
+        retry_decoded = retry_raw if isinstance(retry_raw, dict) else json.loads(retry_raw)
+    except json.JSONDecodeError as e:
+        print("flightlog JSON 解析失败:", e)
+        return None
 
+    retry_src = retry_decoded.get("src")
+    if not retry_src or "GetFlightLog" not in retry_src:
+        print("flightlog 响应中没有 GetFlightLog 字段,退出")
+        return None
+
+    return retry_decoded
+
+
+def archive_match_bundle(state: str, timestamp: str, flightlog_payload: str) -> Union[Path, None]:
+    replay_root = LOCAL_PATH / "Replays"
+    replay_dir = replay_root / f"{FSM_MAPS[state]['mapname']}_{timestamp}"
+    zip_path = replay_root / f"{FSM_MAPS[state]['mapname']}_{timestamp}.zip"
+    create_folder(replay_root)
+
+    try:
+        copy_folder(AUTOSAVE_PATH, replay_dir)
+        with open(replay_dir / "flightlog.json", "w", encoding='utf-8') as f:
+            f.write(flightlog_payload)
+        zip_folder(replay_dir, replay_dir)
+        delete_folder(AUTOSAVE_PATH)
+        return zip_path if zip_path.exists() else None
     except Exception as e:
         print(f"保存replay失败: {e}")
         print("单独保存flightlog")
-        create_folder(LOCAL_PATH/"Replays"/f"{FSM_MAPS[state]['mapname']}_{timestamp}")
-        with open(LOCAL_PATH/"Replays"/f"{FSM_MAPS[state]['mapname']}_{timestamp}/flightlog.json", "w", encoding='utf-8') as f:
-            f.write(msg_str)
-        zip_folder(LOCAL_PATH/"Replays"/f"{FSM_MAPS[state]['mapname']}_{timestamp}", LOCAL_PATH/"Replays"/f"{FSM_MAPS[state]['mapname']}_{timestamp}") #.zip is added in the function
-        delete_folder(LOCAL_PATH/"Replays"/f"{FSM_MAPS[state]['mapname']}_{timestamp}")
-
+        try:
+            create_folder(replay_dir)
+            with open(replay_dir / "flightlog.json", "w", encoding='utf-8') as f:
+                f.write(flightlog_payload)
+            zip_folder(replay_dir, replay_dir)
+            return zip_path if zip_path.exists() else None
+        except Exception as fallback_error:
+            print(f"保存flightlog压缩包失败: {fallback_error}")
+            return None
     finally:
-        #replay info
-        with open(LOCAL_PATH/"Replays"/f"{FSM_MAPS[state]['mapname']}_{timestamp}.zip","rb",) as f:
-            meta_blob = f.read()
-        replay_info = server.replay_info_template.copy()
-        replay_info["file_name"] = f"{FSM_MAPS[state]['mapname']}_{timestamp}.zip"
-        replay_info["map_name"] = FSM_MAPS[state]['mapname']
-        replay_info["played_at"] = timestamp
-        replay_info["meta_blob"] = meta_blob
-        replay_info["map_type"] = FSM_MAPS[state]['map_type']
-        #save global event history
-        if server.global_event_history:
-            db_flightlog.save_global_event_history(server.global_event_history, replay_info, msg_new)
-            db_flightlog.update_player_elo(online_players, FSM_MAPS[state]['map_type'])
-            
-        server.global_event_history.clear()
-        server.online_players.clear()
+        delete_folder(replay_dir)
+
+
+def build_replay_info(state: str, timestamp: str, archive_path: Union[Path, None]) -> dict:
+    replay_info = server.replay_info_template.copy()
+    replay_info["file_name"] = f"{FSM_MAPS[state]['mapname']}_{timestamp}.zip"
+    replay_info["map_name"] = FSM_MAPS[state]['mapname']
+    replay_info["played_at"] = timestamp
+    replay_info["map_type"] = FSM_MAPS[state]['map_type']
+
+    if archive_path and archive_path.exists():
+        with open(archive_path, "rb") as f:
+            replay_info["meta_blob"] = f.read()
+    else:
+        print("[WARN] Replay archive is missing, saving metadata without blob")
+        replay_info["meta_blob"] = b""
+
+    return replay_info
             
 
 def zip_folder(folder: Path, out_zip: Path):
@@ -676,191 +761,61 @@ def _test():
         return
     print(dict_received_message.get("msg", "No msg field"))
 
-def _state1():
-    global count_num
-    print("State 1\n")
-    print(f"count_num: {count_num}\n")
-    duration = 1 * H2S
-    time_prepare = 60 #time for read briefing
-    if count_num == 0:
-        init_server("state1")
+def make_state(
+    state: str,
+    *,
+    label: str,
+    duration: float,
+    time_prepare: int = 60,
+    post_schedule_sleep: float = 5.0,
+) -> Callable[[], None]:
+    def _run() -> None:
+        global count_num
+        print(f"{label}\n")
+        print(f"count_num: {count_num}\n")
+
+        if count_num == 0:
+            init_server(state)
+        else:
+            restart_server(state)
         count_num += 1
-    else:
-        restart_server("state1")
-        count_num += 1
-    def on_lobby_complete():
-        server.send_message("start")
 
-        def on_match_complete():
-            end_state("state1")
-            server._state_complete.set()
+        def on_lobby_complete() -> None:
+            server.send_message("start")
 
-        server.wait_match_duration(duration, on_match_complete)
+            def on_match_complete() -> None:
+                end_state(state)
+                server._state_complete.set()
 
-    server.wait_lobby_period(time_prepare, on_lobby_complete)
+            server.wait_match_duration(int(duration), on_match_complete)
 
-def _state2():
-    global count_num
-    duration = 1 * 20 * 60 #20 minutes
-    time_prepare = 60 #time for read briefing
-    print("State 2\n")
-    print(f"count_num: {count_num}\n")
-    if count_num == 0:
-        init_server("state2")
-        count_num += 1
-    else:
-        restart_server("state2")
-        count_num += 1
-    def on_lobby_complete():
-        server.send_message("start")
+        server.wait_lobby_period(time_prepare, on_lobby_complete)
+        if post_schedule_sleep:
+            time.sleep(post_schedule_sleep)
 
-        def on_match_complete():
-            end_state("state2")
-            server._state_complete.set()
-
-        server.wait_match_duration(duration, on_match_complete)
-
-    server.wait_lobby_period(time_prepare, on_lobby_complete)
-
-def _state3():
-    global count_num
-    duration = 1 * H2S
-    time_prepare = 60 #time for read briefing
-    print("State 3\n")
-    print(f"count_num: {count_num}\n")
-    if count_num == 0:
-        init_server("state3")
-        count_num += 1
-    else:
-        restart_server("state3")
-        count_num += 1
-    def on_lobby_complete():
-        server.send_message("start")
-
-        def on_match_complete():
-            end_state("state3")
-            server._state_complete.set()
-
-        server.wait_match_duration(duration, on_match_complete)
-
-    server.wait_lobby_period(time_prepare, on_lobby_complete)
-
-def _state4():
-    global count_num
-    duration = 1 * H2S
-    time_prepare = 60 #time for read briefing
-    print("State 4\n")
-    print(f"count_num: {count_num}\n")
-    if count_num == 0:
-        init_server("state4")
-        count_num += 1
-    else:
-        restart_server("state4")
-        count_num += 1
-    def on_lobby_complete():
-        server.send_message("start")
-
-        def on_match_complete():
-            end_state("state4")
-            server._state_complete.set()
-
-        server.wait_match_duration(duration, on_match_complete)
-
-    server.wait_lobby_period(time_prepare, on_lobby_complete)
-
-def _state5():
-    global count_num
-    duration = 1 * H2S
-    time_prepare = 60 #time for read briefing
-    print("State 5\n")
-    print(f"count_num: {count_num}\n")
-    if count_num == 0:
-        init_server("state5")
-        count_num += 1
-    else:
-        restart_server("state5")
-        count_num += 1
-    def on_lobby_complete():
-        server.send_message("start")
-
-        def on_match_complete():
-            end_state("state5")
-            server._state_complete.set()
-
-        server.wait_match_duration(duration, on_match_complete)
-
-    server.wait_lobby_period(time_prepare, on_lobby_complete)
-
-def _state6():
-    global count_num
-    duration = 1 * H2S
-    time_prepare = 60 #time for read briefing
-    print("State 6\n")
-    print(f"count_num: {count_num}\n")
-    if count_num == 0:
-        init_server("state6")
-        count_num += 1
-    else:
-        restart_server("state6")
-        count_num += 1
-    def on_lobby_complete():
-        server.send_message("start")
-
-        def on_match_complete():
-            end_state("state6")
-            server._state_complete.set()
-
-        server.wait_match_duration(duration, on_match_complete)
-
-    server.wait_lobby_period(time_prepare, on_lobby_complete)
+    _run.__name__ = f"_{state}"
+    return _run
 
 
-def _state7():
-    global count_num
-    duration = 1 * H2S
-    time_prepare = 60 #time for read briefing
-    print("State 7\n")
-    print(f"count_num: {count_num}\n")
-    if count_num == 0:
-        init_server("state7")
-        count_num += 1
-    else:
-        restart_server("state7")
-        count_num += 1
-    def on_lobby_complete():
-        server.send_message("start")
+FSM_DEFAULT_DURATION = 1 * H2S
+FSM_DURATIONS = {
+    "state1": 0.5 * H2S,
+}
 
-        def on_match_complete():
-            end_state("state7")
-            server._state_complete.set()
-
-        server.wait_match_duration(duration, on_match_complete)
-    server.wait_lobby_period(time_prepare, on_lobby_complete)
-
-def _state8():
-    global count_num
-    duration = 1 * H2S
-    time_prepare = 60 #time for read briefing
-    print("State 8\n")
-    print(f"count_num: {count_num}\n")
-    if count_num == 0:
-        init_server("state8")
-        count_num += 1
-    else:
-        restart_server("state8")
-        count_num += 1
-    def on_lobby_complete():
-        server.send_message("start")
-
-        def on_match_complete():
-            end_state("state8")
-            server._state_complete.set()
-
-        server.wait_match_duration(duration, on_match_complete)
-    server.wait_lobby_period(time_prepare, on_lobby_complete)
+for i in range(1, FSM_STATE_NUM + 1):
+    _state_name = f"{STATE}{i}"
+    globals()[f"_{_state_name}"] = make_state(
+        _state_name,
+        label=f"State {i}",
+        duration=FSM_DURATIONS.get(_state_name, FSM_DEFAULT_DURATION),
+    )
 
 def main():
-    FSM_Nodes = [_state1, _state2, _state3, _state4, _state5, _state6, _state7, _state8]
+    FSM_Nodes = []
+    for i in range(1,FSM_STATE_NUM+1):
+        str_state = f'_{STATE}{i}'
+        FSM_Nodes.append(getattr(sys.modules[__name__], str_state))
+    print(FSM_Nodes)
     if not server.start_server():
         print("无法连接到服务器，程序退出")
         return
@@ -870,8 +825,17 @@ def main():
     for k, v in FSM_MAPS.items():
         print(k, "=>", v["mapname"])
     print("--------------------------------")
-    start_index = input("请输入起始状态(从0开始): ")
-    start_index = int(start_index)
+    while True:
+        start_index = input("请输入起始状态: ")
+        start_index = int(start_index)
+        start_index -= 1
+        if start_index not in range(FSM_STATE_NUM):
+            print(start_index)
+            print(type(start_index))
+            print("输入无效，请输入1到4之间的数字")
+        else:
+            break
+    
     if RAND_MODE:
         while True:
             random.choice(FSM_Nodes)()
