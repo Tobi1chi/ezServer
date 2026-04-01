@@ -122,6 +122,15 @@ class ReviewFixesTest(unittest.TestCase):
         self.assertEqual(intent["time_range"], "this_week")
         self.assertRegex(plan.params[-1], r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$")
 
+    def test_elo_keyword_is_not_treated_as_player_name(self):
+        detector = IntentDetector()
+        intent = detector.detect("查看本周elo趋势")
+        plan = SQLGenerator().generate_plan(intent)
+
+        self.assertEqual(intent["intent"], "player_elo_trend")
+        self.assertEqual(intent["players"], [])
+        self.assertNotIn("%elo%", [str(param).lower() for param in plan.params])
+
     def test_missing_online_player_kill_event_returns_false_without_crashing(self):
         server = EzServer()
         try:

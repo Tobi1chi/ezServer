@@ -60,6 +60,17 @@ class IntentDetector:
         "BFM": ["bfm", "格斗", "近战", "狗斗"],
         "PVE": ["pve", "ai", "电脑"],
     }
+    IGNORED_PLAYER_TOKENS = {
+        "ai",
+        "bfm",
+        "bvr",
+        "elo",
+        "kd",
+        "kda",
+        "pve",
+        "sql",
+        "vs",
+    }
     
     def detect(self, query: str) -> Dict[str, Any]:
         """
@@ -119,9 +130,8 @@ class IntentDetector:
         candidates.extend(explicit_player)
 
         latin_tokens = re.findall(r'[A-Za-z][A-Za-z0-9_\-]{1,31}', query)
-        ignored = {"BVR", "BFM", "PVE", "AI", "SQL"}
         for token in latin_tokens:
-            if token.upper() not in ignored:
+            if token.casefold() not in self.IGNORED_PLAYER_TOKENS:
                 candidates.append(token)
 
         unique_candidates = []
