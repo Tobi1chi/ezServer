@@ -104,6 +104,24 @@ class ReviewFixesTest(unittest.TestCase):
         self.assertEqual(columns, ["value"])
         self.assertEqual(rows, [{"value": 1}])
 
+    def test_rag_executor_rejects_mutating_cte_queries(self):
+        executor = RAGExecutor(self.db_path)
+        rows, columns = executor.execute(
+            "WITH doomed AS (SELECT 1) DELETE FROM players"
+        )
+
+        self.assertEqual(rows, [])
+        self.assertEqual(columns, [])
+
+    def test_elo_trend_uses_history_timestamp_format_for_time_filters(self):
+        detector = IntentDetector()
+        intent = detector.detect("查看Tobiichi本周elo趋势")
+        plan = SQLGenerator().generate_plan(intent)
+
+        self.assertEqual(intent["intent"], "player_elo_trend")
+        self.assertEqual(intent["time_range"], "this_week")
+        self.assertRegex(plan.params[-1], r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$")
+
     def test_missing_online_player_kill_event_returns_false_without_crashing(self):
         server = EzServer()
         try:

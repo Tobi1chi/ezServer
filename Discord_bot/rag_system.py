@@ -205,6 +205,7 @@ class SQLGenerator:
         player_id_expr: str,
         event_type_expr: Optional[str],
         time_expr: str,
+        time_format: str = "%Y%m%d_%H%M%S",
     ) -> Tuple[List[str], List[Any]]:
         clauses: List[str] = []
         params: List[Any] = []
@@ -227,12 +228,17 @@ class SQLGenerator:
             clauses.append(f"{event_type_expr} LIKE ?")
             params.append(f"{map_type.upper()}_%")
 
-        time_clauses, time_params = self._build_time_filters(intent.get("time_range"), time_expr)
+        time_clauses, time_params = self._build_time_filters(intent.get("time_range"), time_expr, time_format)
         clauses.extend(time_clauses)
         params.extend(time_params)
         return clauses, params
 
-    def _build_time_filters(self, time_range: Optional[str], time_expr: str) -> Tuple[List[str], List[str]]:
+    def _build_time_filters(
+        self,
+        time_range: Optional[str],
+        time_expr: str,
+        time_format: str,
+    ) -> Tuple[List[str], List[str]]:
         if not time_range:
             return [], []
 
@@ -243,30 +249,30 @@ class SQLGenerator:
 
         if time_range == "today":
             clauses.append(f"{time_expr} >= ?")
-            params.append(today_start.strftime("%Y%m%d_%H%M%S"))
+            params.append(today_start.strftime(time_format))
         elif time_range == "yesterday":
             yesterday_start = today_start - timedelta(days=1)
             clauses.extend([f"{time_expr} >= ?", f"{time_expr} < ?"])
             params.extend([
-                yesterday_start.strftime("%Y%m%d_%H%M%S"),
-                today_start.strftime("%Y%m%d_%H%M%S"),
+                yesterday_start.strftime(time_format),
+                today_start.strftime(time_format),
             ])
         elif time_range == "this_week":
             week_start = today_start - timedelta(days=today_start.weekday())
             clauses.append(f"{time_expr} >= ?")
-            params.append(week_start.strftime("%Y%m%d_%H%M%S"))
+            params.append(week_start.strftime(time_format))
         elif time_range == "last_week":
             this_week_start = today_start - timedelta(days=today_start.weekday())
             last_week_start = this_week_start - timedelta(days=7)
             clauses.extend([f"{time_expr} >= ?", f"{time_expr} < ?"])
             params.extend([
-                last_week_start.strftime("%Y%m%d_%H%M%S"),
-                this_week_start.strftime("%Y%m%d_%H%M%S"),
+                last_week_start.strftime(time_format),
+                this_week_start.strftime(time_format),
             ])
         elif time_range == "this_month":
             month_start = today_start.replace(day=1)
             clauses.append(f"{time_expr} >= ?")
-            params.append(month_start.strftime("%Y%m%d_%H%M%S"))
+            params.append(month_start.strftime(time_format))
 
         return clauses, params
 
@@ -371,6 +377,7 @@ class SQLGenerator:
             player_id_expr="p.id",
             event_type_expr="e.event_type",
             time_expr="eh.at_time",
+            time_format="%Y-%m-%d %H:%M:%S",
         )
         return self._compose_query(
             base_sql,
@@ -599,6 +606,125 @@ class RAGExecutor:
     
     def __init__(self, db_path=FLIGHTLOG_DB_PATH):
         self.db_path = db_path
+
+    def _get_final_query_keyword(self, sql: str) -> Optional[str]:
+        sql_lower = sql.lower()
+        length = len(sql_lower)
+        i = 0
+
+        def skip_ws_and_comments(index: int) -> int:
+            while index < length:
+                if sql_lower[index].isspace():
+                    index += 1
+                    continue
+                if sql_lower.startswith("--", index):
+                    newline = sql_lower.find("\n", index)
+                    return length if newline == -1 else newline + 1
+                if sql_lower.startswith("/*", index):
+                    end = sql_lower.find("*/", index + 2)
+                    return length if end == -1 else end + 2
+                break
+            return index
+
+        def read_word(index: int) -> Tuple[Optional[str], int]:
+            index = skip_ws_and_comments(index)
+            start = index
+            while index < length and (sql_lower[index].isalnum() or sql_lower[index] == "_"):
+                index += 1
+            if start == index:
+                return None, index
+            return sql_lower[start:index], index
+
+        i = skip_ws_and_comments(i)
+        first_word, i = read_word(i)
+        if first_word != "with":
+            return first_word
+
+        maybe_recursive, next_index = read_word(i)
+        if maybe_recursive == "recursive":
+            i = next_index
+
+        def skip_balanced_parentheses(index: int) -> Optional[int]:
+            index = skip_ws_and_comments(index)
+            if index >= length or sql_lower[index] != "(":
+                return None
+
+            depth = 0
+            in_single = False
+            in_double = False
+            while index < length:
+                ch = sql_lower[index]
+                if in_single:
+                    if ch == "'" and not sql_lower.startswith("''", index):
+                        in_single = False
+                    elif sql_lower.startswith("''", index):
+                        index += 1
+                    index += 1
+                    continue
+                if in_double:
+                    if ch == '"' and not sql_lower.startswith('""', index):
+                        in_double = False
+                    elif sql_lower.startswith('""', index):
+                        index += 1
+                    index += 1
+                    continue
+                if sql_lower.startswith("--", index):
+                    newline = sql_lower.find("\n", index)
+                    if newline == -1:
+                        return None
+                    index = newline + 1
+                    continue
+                if sql_lower.startswith("/*", index):
+                    end = sql_lower.find("*/", index + 2)
+                    if end == -1:
+                        return None
+                    index = end + 2
+                    continue
+                if ch == "'":
+                    in_single = True
+                    index += 1
+                    continue
+                if ch == '"':
+                    in_double = True
+                    index += 1
+                    continue
+                if ch == "(":
+                    depth += 1
+                elif ch == ")":
+                    depth -= 1
+                    if depth == 0:
+                        return index + 1
+                index += 1
+            return None
+
+        while i < length:
+            cte_name, i = read_word(i)
+            if not cte_name:
+                return None
+
+            i = skip_ws_and_comments(i)
+            if i < length and sql_lower[i] == "(":
+                i = skip_balanced_parentheses(i)
+                if i is None:
+                    return None
+
+            as_keyword, i = read_word(i)
+            if as_keyword != "as":
+                return None
+
+            i = skip_balanced_parentheses(i)
+            if i is None:
+                return None
+
+            i = skip_ws_and_comments(i)
+            if i < length and sql_lower[i] == ",":
+                i += 1
+                continue
+
+            final_keyword, _ = read_word(i)
+            return final_keyword
+
+        return None
     
     def execute(self, sql: str, params: Optional[List[Any]] = None) -> Tuple[List[Dict], List[str]]:
         """
@@ -608,7 +734,8 @@ class RAGExecutor:
         """
         sql_to_run = sql.strip()
         # 只允许只读查询，避免执行非 SELECT 语句
-        if not sql_to_run.lower().startswith(("select", "with")):
+        final_keyword = self._get_final_query_keyword(sql_to_run)
+        if final_keyword != "select":
             print(f"[ERROR] 仅允许执行SELECT查询，收到: {sql_to_run[:50]}...")
             return [], []
 
